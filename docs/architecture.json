@@ -1,0 +1,1205 @@
+{
+  "$schema": "iora_sdp/architecture/v1",
+  "project": {
+    "name": "iora_sdp",
+    "version": "0.1.0",
+    "description": "Standalone, header-only C++17 SDP parser/serializer library with WebRTC offer/answer utilities",
+    "language": "C++17",
+    "buildSystem": "CMake (header-only INTERFACE library)",
+    "license": "MPL-2.0",
+    "repository": "/workspace/iora_sdp"
+  },
+
+  "designPrinciples": [
+    "Header-only — no .cpp files, no shared library, just include. Applications add the include path and gain full SDP functionality at zero link cost.",
+    "Typed attribute model — known SDP attributes are parsed into strongly-typed C++ structs, not string maps. Compile-time type safety for all standard attributes.",
+    "Unknown attributes preserved — any attribute not recognized by the parser is stored as a generic string attribute and faithfully serialized back, ensuring round-trip safety for proprietary or future extensions.",
+    "string_view-based parser — zero-copy where possible, referencing the original SDP text to minimize allocations during parsing.",
+    "Lenient parsing by default — real-world SDP from browsers, SIP phones, and gateways is frequently malformed. The parser defaults to best-effort mode, skipping unrecognizable lines rather than rejecting the entire SDP. Strict mode is opt-in for validation use cases.",
+    "WebRTC-first but not WebRTC-only — full support for WebRTC SDP conventions (BUNDLE, rtcp-mux, DTLS-SRTP, ICE, msid, simulcast) while also handling plain SIP SDP without WebRTC extensions.",
+    "No SDP negotiation state machine — the library provides utility functions for common offer/answer operations, but the application drives negotiation logic. This avoids opinionated state machines that conflict with real-world SIP/WebRTC stacks.",
+    "No dependency on iora_codecs or iora_rtp — iora_sdp is fully standalone. It parses and serializes SDP text and provides data structures. Codec awareness, RTP session management, and transport are separate concerns.",
+    "Correct field ordering per RFC 4566 section 5 — the serializer always emits fields in the mandatory order (v, o, s, i, u, e, p, c, b, t, r, z, k, a, then m-blocks), regardless of the order in which the application populates the data model."
+  ],
+
+  "layers": {
+    "overview": "The library is organized into five layers (0-4), each depending only on layers below it. All layers are header-only and reside under include/iora/sdp/. Transport, signaling, codec management, and RTP are explicitly out of scope.",
+    "stack": [
+      {
+        "level": 4,
+        "name": "Offer/Answer Utilities",
+        "description": "Optional helper functions for common WebRTC and SIP SDP operations — codec matching, ICE candidate insertion, transceiver scaffolding, unused codec pruning, answer generation, direction flipping. These are stateless utility functions, NOT a negotiation state machine."
+      },
+      {
+        "level": 3,
+        "name": "Serializer",
+        "description": "Converts a SessionDescription data model back into conformant SDP text (std::string), with correct field ordering per RFC 4566 section 5 and attribute serialization matching parser round-trip."
+      },
+      {
+        "level": 2,
+        "name": "Parser",
+        "description": "Line-by-line state machine that transforms raw SDP text (std::string_view) into a fully populated SessionDescription data model, dispatching known attributes to typed structs."
+      },
+      {
+        "level": 1,
+        "name": "Data Model",
+        "description": "Structured C++ types representing a complete SDP document — SessionDescription, MediaDescription, Origin, typed attribute structs for rtpmap, fmtp, candidate, fingerprint, extmap, ssrc, and all other standard attributes."
+      },
+      {
+        "level": 0,
+        "name": "Types and Constants",
+        "description": "Foundational enums, constants, and common value types — media types, transport protocols, network/address types, direction enum, bandwidth units, attribute name constants."
+      }
+    ],
+    "outOfScope": [
+      "SIP signaling (INVITE, re-INVITE, UPDATE) — belongs in a SIP stack library",
+      "WebRTC PeerConnection state machine — belongs in a WebRTC integration library (iora_webrtc)",
+      "ICE agent (connectivity checks, STUN/TURN) — iora_sdp only parses/serializes ICE attributes in SDP",
+      "DTLS handshake and SRTP key derivation — iora_sdp only parses/serializes fingerprint and setup attributes",
+      "RTP session creation from SDP — companion iora_rtp library maps SDP media descriptions to RTP sessions",
+      "Codec instantiation from SDP — companion iora_codecs library maps rtpmap/fmtp to codec instances via CodecRegistry",
+      "SRTP encryption/decryption — iora_sdp only parses/serializes crypto attributes",
+      "SCTP association management — iora_sdp only parses/serializes data channel SDP (sctpmap, sctp-port)",
+      "Oracling or SDP mangling for SBC B2BUA — application-level concern using iora_sdp as a parse/modify/serialize tool"
+    ]
+  },
+
+  "externalDependencies": {
+    "description": "iora_sdp has NO external dependencies. Pure C++17 standard library only.",
+    "runtimeDependencies": "None. iora_sdp is a pure parsing/serialization library with no runtime dependencies, no network I/O, no threads, and no file I/O."
+  },
+
+  "coreAbstractions": {
+    "description": "Core types, data model, parser, serializer, and utility interfaces defined by iora_sdp. All are header-only.",
+
+    "layer0_types": {
+      "MediaType": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for SDP media types from the m= line",
+        "values": ["AUDIO", "VIDEO", "APPLICATION", "TEXT", "MESSAGE"],
+        "notes": "APPLICATION covers both SCTP data channels (webrtc-datachannel) and other non-audio/video uses."
+      },
+      "TransportProtocol": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for SDP transport protocols from the m= line proto field",
+        "values": [
+          "UDP",
+          "RTP_AVP",
+          "RTP_SAVP",
+          "RTP_SAVPF",
+          "UDP_TLS_RTP_SAVPF",
+          "DTLS_SCTP",
+          "UDP_DTLS_SCTP",
+          "TCP_DTLS_SCTP"
+        ],
+        "notes": "Enum values use underscores where SDP uses slashes (e.g., RTP_AVP maps to 'RTP/AVP', UDP_TLS_RTP_SAVPF maps to 'UDP/TLS/RTP/SAVPF'). The serializer performs underscore-to-slash conversion for SDP output; the parser performs the reverse. DTLS/SCTP variants are for data channels per RFC 8841."
+      },
+      "NetworkType": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for SDP network type (c= and o= lines)",
+        "values": ["IN"],
+        "notes": "Only IN (Internet) is defined by RFC 4566. Stored as enum for type safety, but effectively always IN."
+      },
+      "AddressType": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for SDP address type (c= and o= lines)",
+        "values": ["IP4", "IP6"]
+      },
+      "Direction": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for SDP direction attributes",
+        "values": ["SENDRECV", "SENDONLY", "RECVONLY", "INACTIVE"],
+        "notes": "Default is SENDRECV if no direction attribute is present (RFC 3264 section 6.1)."
+      },
+      "SetupRole": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for the setup attribute (RFC 4145) used in DTLS negotiation",
+        "values": ["ACTIVE", "PASSIVE", "ACTPASS", "HOLDCONN"],
+        "notes": "WebRTC offers typically use ACTPASS; answers use ACTIVE or PASSIVE."
+      },
+      "BandwidthType": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for SDP bandwidth modifier types (b= line)",
+        "values": ["CT", "AS", "TIAS", "RS", "RR"],
+        "notes": "CT = Conference Total, AS = Application Specific, TIAS = Transport Independent Application Specific (RFC 3890). RS/RR are RTCP bandwidth modifiers (RFC 3556)."
+      },
+      "IceCandidateType": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for ICE candidate types (RFC 8445)",
+        "values": ["HOST", "SRFLX", "PRFLX", "RELAY"],
+        "notes": "host = local address, srflx = server reflexive (STUN), prflx = peer reflexive, relay = TURN relay."
+      },
+      "IceTransportType": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for ICE candidate transport protocol",
+        "values": ["UDP", "TCP"],
+        "notes": "UDP is the common case. TCP candidates are used for ICE-TCP (RFC 6544)."
+      },
+      "RidDirection": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Enum for a=rid direction",
+        "values": ["SEND", "RECV"],
+        "notes": "Used in RidAttribute to indicate whether the restriction applies to the send or receive direction."
+      },
+      "AttributeConstants": {
+        "location": "include/iora/sdp/types.hpp",
+        "description": "Compile-time string constants for all known SDP attribute names",
+        "values": [
+          "rtpmap", "fmtp", "rtcp", "rtcp-mux", "rtcp-mux-only", "rtcp-rsize", "rtcp-fb",
+          "extmap", "extmap-allow-mixed", "ssrc", "ssrc-group", "mid", "msid",
+          "group", "ice-ufrag", "ice-pwd", "ice-options", "ice-lite",
+          "candidate", "end-of-candidates",
+          "fingerprint", "setup", "crypto",
+          "sendrecv", "sendonly", "recvonly", "inactive",
+          "sctpmap", "sctp-port", "max-message-size",
+          "simulcast", "rid",
+          "framerate", "ptime", "maxptime"
+        ],
+        "notes": "Used by the parser for attribute dispatch and by the serializer for canonical attribute name output."
+      }
+    },
+
+    "layer1_dataModel": {
+      "SessionDescription": {
+        "location": "include/iora/sdp/session_description.hpp",
+        "description": "Top-level container representing a complete SDP document. Maps to all session-level fields (v=, o=, s=, i=, u=, e=, p=, c=, b=, t=, z=, k=, a=) plus an ordered list of MediaDescription blocks.",
+        "fields": {
+          "version": "uint8_t — SDP protocol version, always 0 per RFC 4566",
+          "origin": "Origin — the o= line (username, sessId, sessVersion, netType, addrType, address)",
+          "sessionName": "std::string — the s= line (session name, often '-' or a description)",
+          "sessionInfo": "std::optional<std::string> — the i= line (session information, optional)",
+          "uri": "std::optional<std::string> — the u= line (URI of description, optional)",
+          "emailAddress": "std::optional<std::string> — the e= line (email contact, optional)",
+          "phoneNumber": "std::optional<std::string> — the p= line (phone contact, optional)",
+          "connection": "std::optional<ConnectionData> — session-level c= line (may be overridden per media)",
+          "bandwidths": "std::vector<BandwidthInfo> — session-level b= lines",
+          "timeDescriptions": "std::vector<TimeDescription> — t= lines (at least one required)",
+          "zoneAdjustments": "std::vector<ZoneAdjustment> — time zone adjustments (z= line), where ZoneAdjustment has adjustmentTime and offset",
+          "encryptionKey": "std::optional<std::string> — k= line (deprecated in RFC 8866, parsed for backward compatibility)",
+          "attributes": "std::vector<GenericAttribute> — session-level a= lines (unrecognized attributes preserved as name/value pairs)",
+          "mediaDescriptions": "std::vector<MediaDescription> — ordered list of m= blocks",
+          "groups": "std::vector<GroupAttribute> — parsed group attributes (BUNDLE, LS, FID, etc.)",
+          "iceUfrag": "std::optional<std::string> — session-level a=ice-ufrag (inherited by media sections)",
+          "icePwd": "std::optional<std::string> — session-level a=ice-pwd",
+          "iceOptions": "std::vector<std::string> — session-level a=ice-options",
+          "iceLite": "bool — session-level a=ice-lite, default false",
+          "fingerprints": "std::vector<FingerprintAttribute> — session-level a=fingerprint (multiple allowed for different hash algorithms)",
+          "setup": "std::optional<SetupRole> — session-level a=setup",
+          "extmapAllowMixed": "bool — session-level a=extmap-allow-mixed (RFC 8285), default false"
+        }
+      },
+      "Origin": {
+        "location": "include/iora/sdp/session_description.hpp",
+        "description": "Represents the o= line — session originator and session identifier",
+        "fields": {
+          "username": "std::string — user's login on the originating host, or '-' if unavailable",
+          "sessId": "std::string — numeric session identifier (uint64 as string to avoid overflow)",
+          "sessVersion": "std::string — numeric session version (uint64 as string)",
+          "netType": "NetworkType — network type (IN)",
+          "addrType": "AddressType — address type (IP4 or IP6)",
+          "address": "std::string — address of the originating machine"
+        }
+      },
+      "ConnectionData": {
+        "location": "include/iora/sdp/session_description.hpp",
+        "description": "Represents a c= line — connection information for a media stream",
+        "fields": {
+          "netType": "NetworkType — network type (IN)",
+          "addrType": "AddressType — address type (IP4 or IP6)",
+          "address": "std::string — connection address (unicast or multicast). For IPv6, may contain full address notation.",
+          "ttl": "std::optional<uint8_t> — multicast TTL (IPv4 only)",
+          "numberOfAddresses": "std::optional<uint16_t> — number of multicast addresses"
+        }
+      },
+      "BandwidthInfo": {
+        "location": "include/iora/sdp/session_description.hpp",
+        "description": "Represents a b= line — bandwidth information",
+        "fields": {
+          "type": "BandwidthType — modifier (CT, AS, TIAS, RS, RR)",
+          "bandwidth": "uint32_t — bandwidth value in kbps (CT, AS) or bps (TIAS)"
+        }
+      },
+      "TimeDescription": {
+        "location": "include/iora/sdp/session_description.hpp",
+        "description": "Represents a t= line — timing information, with optional r= repeat times",
+        "fields": {
+          "startTime": "uint64_t — NTP start time (0 = permanent session)",
+          "stopTime": "uint64_t — NTP stop time (0 = unbounded)",
+          "repeatTimes": "std::vector<RepeatTime> — repeat intervals (r= lines), where RepeatTime has repeatInterval, activeDuration, offsets"
+        },
+        "notes": "WebRTC always uses t=0 0 (permanent, unbounded session). SIP may use specific times for scheduled conferences."
+      },
+      "MediaDescription": {
+        "location": "include/iora/sdp/session_description.hpp",
+        "description": "Represents a single m= block — one media section with its associated attributes",
+        "fields": {
+          "mediaType": "MediaType — audio, video, application, etc.",
+          "port": "uint16_t — transport port (0 = rejected/disabled media)",
+          "numberOfPorts": "std::optional<uint16_t> — number of ports (rarely used, for multicast)",
+          "protocol": "TransportProtocol — transport protocol (RTP/SAVPF, UDP/TLS/RTP/SAVPF, etc.)",
+          "formats": "std::vector<std::string> — format list (payload type numbers for RTP, or format strings for non-RTP)",
+          "connection": "std::optional<ConnectionData> — media-level c= line (overrides session-level)",
+          "bandwidths": "std::vector<BandwidthInfo> — media-level b= lines",
+          "encryptionKey": "std::optional<std::string> — k= line (deprecated in RFC 8866, parsed for backward compatibility)",
+          "mid": "std::optional<std::string> — media identification tag (a=mid, RFC 5888)",
+          "direction": "Direction — sendrecv/sendonly/recvonly/inactive (default SENDRECV)",
+          "rtpMaps": "std::vector<RtpMapAttribute> — a=rtpmap lines for this media",
+          "fmtps": "std::vector<FmtpAttribute> — a=fmtp lines for this media",
+          "rtcpFeedbacks": "std::vector<RtcpFbAttribute> — a=rtcp-fb lines for this media",
+          "extMaps": "std::vector<ExtMapAttribute> — a=extmap lines for this media",
+          "ssrcs": "std::vector<SsrcAttribute> — a=ssrc lines for this media",
+          "ssrcGroups": "std::vector<SsrcGroupAttribute> — a=ssrc-group lines for this media",
+          "candidates": "std::vector<IceCandidate> — a=candidate lines for this media",
+          "fingerprints": "std::vector<FingerprintAttribute> — a=fingerprint (DTLS). Multiple allowed for different hash algorithms",
+          "setup": "std::optional<SetupRole> — a=setup (DTLS role)",
+          "iceUfrag": "std::optional<std::string> — a=ice-ufrag",
+          "icePwd": "std::optional<std::string> — a=ice-pwd",
+          "iceOptions": "std::vector<std::string> — a=ice-options (e.g., 'trickle', 'ice2')",
+          "rtcpMux": "bool — a=rtcp-mux present (RFC 5761)",
+          "rtcpMuxOnly": "bool — a=rtcp-mux-only (RFC 8858), default false",
+          "rtcpRsize": "bool — a=rtcp-rsize present (RFC 5506)",
+          "rtcp": "std::optional<RtcpAttribute> — a=rtcp line (RFC 3605)",
+          "msid": "std::vector<MsidAttribute> — a=msid (RFC 8830). Unified Plan allows multiple a=msid lines per media section",
+          "crypto": "std::vector<CryptoAttribute> — a=crypto lines (RFC 4568, SDES-SRTP)",
+          "sctpPort": "std::optional<uint16_t> — a=sctp-port (RFC 8841)",
+          "maxMessageSize": "std::optional<uint32_t> — a=max-message-size (RFC 8841)",
+          "simulcast": "std::optional<SimulcastAttribute> — a=simulcast",
+          "rids": "std::vector<RidAttribute> — a=rid lines",
+          "ptime": "std::optional<uint32_t> — a=ptime (packet time in ms)",
+          "maxptime": "std::optional<uint32_t> — a=maxptime (maximum packet time in ms)",
+          "framerate": "std::optional<double> — a=framerate (video frame rate)",
+          "endOfCandidates": "bool — a=end-of-candidates, default false",
+          "extmapAllowMixed": "bool — media-level a=extmap-allow-mixed (RFC 8285), default false",
+          "genericAttributes": "std::vector<GenericAttribute> — unrecognized a= lines preserved as name/value string pairs"
+        }
+      }
+    },
+
+    "layer1_attributes": {
+      "RtpMapAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=rtpmap line — maps payload type to encoding name, clock rate, and optional channel count",
+        "fields": {
+          "payloadType": "uint8_t — RTP payload type number (0-127)",
+          "encodingName": "std::string — codec name (e.g., 'opus', 'VP8', 'H264', 'PCMU')",
+          "clockRate": "uint32_t — RTP clock rate in Hz (e.g., 48000 for Opus, 90000 for video)",
+          "channels": "std::optional<uint8_t> — number of channels (present for audio codecs, omitted for video)"
+        },
+        "rfcReference": "RFC 4566 section 6, RFC 3551"
+      },
+      "FmtpAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=fmtp line — format-specific parameters for a payload type",
+        "fields": {
+          "payloadType": "uint8_t — RTP payload type this fmtp applies to",
+          "parameters": "std::string — raw parameter string (e.g., 'minptime=10;useinbandfec=1' for Opus, 'level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f' for H.264)",
+          "parameterMap": "std::unordered_map<std::string, std::string> — parsed key=value pairs for convenient access. Populated by the parser; applications can also query raw parameters string for formats with non-key=value syntax."
+        },
+        "rfcReference": "RFC 4566 section 6"
+      },
+      "RtcpFbAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=rtcp-fb line — RTCP feedback capability declaration",
+        "fields": {
+          "payloadType": "std::string — payload type number or '*' for all payload types",
+          "type": "std::string — feedback type (e.g., 'nack', 'ccm', 'transport-cc', 'goog-remb')",
+          "subtype": "std::optional<std::string> — feedback subtype (e.g., 'pli', 'fir', 'sli' for nack/ccm types)"
+        },
+        "rfcReference": "RFC 4585 section 4.2",
+        "notes": "goog-remb is a non-standard/proprietary feedback type originating from Google Chrome. transport-cc is a non-standard/proprietary feedback type for transport-wide congestion control (draft-holmer-rmcat-transport-wide-cc-extensions). Both are widely used in WebRTC but are not defined in any published RFC."
+      },
+      "ExtMapAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=extmap line — RTP header extension mapping",
+        "fields": {
+          "id": "uint16_t — local identifier (1-14 for one-byte header form, 1-255 for two-byte header form per RFC 8285)",
+          "direction": "std::optional<Direction> — optional direction restriction for this extension",
+          "uri": "std::string — extension URI (e.g., 'urn:ietf:params:rtp-hdrext:ssrc-audio-level')",
+          "extensionAttributes": "std::optional<std::string> — optional extension-specific attributes"
+        },
+        "rfcReference": "RFC 5285 / RFC 8285"
+      },
+      "SsrcAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=ssrc line — source-specific SDP attribute",
+        "fields": {
+          "ssrc": "uint32_t — synchronization source identifier",
+          "attributeName": "std::string — attribute name (e.g., 'cname', 'msid', 'label', 'mslabel')",
+          "attributeValue": "std::optional<std::string> — attribute value (may be absent for flag attributes)"
+        },
+        "rfcReference": "RFC 5576 section 4.1"
+      },
+      "SsrcGroupAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=ssrc-group line — grouping of SSRCs",
+        "fields": {
+          "semantics": "std::string — grouping semantics (e.g., 'FID' for flow identification, 'SIM' for simulcast)",
+          "ssrcs": "std::vector<uint32_t> — list of SSRCs in the group"
+        },
+        "rfcReference": "RFC 5576 section 4.2"
+      },
+      "IceCandidate": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=candidate line — ICE candidate with all fields per RFC 8445",
+        "fields": {
+          "foundation": "std::string — candidate foundation (identifies similar candidates for frozen/unfrozen pairing)",
+          "component": "uint8_t — component ID (1 = RTP, 2 = RTCP)",
+          "transport": "IceTransportType — transport protocol (UDP or TCP)",
+          "priority": "uint32_t — candidate priority (higher = preferred)",
+          "address": "std::string — candidate IP address (IPv4 or IPv6)",
+          "port": "uint16_t — candidate port number",
+          "type": "IceCandidateType — candidate type (host, srflx, prflx, relay)",
+          "relAddr": "std::optional<std::string> — related address (for srflx/prflx/relay — the base address)",
+          "relPort": "std::optional<uint16_t> — related port",
+          "tcpType": "std::optional<std::string> — TCP candidate type (active/passive/so) per RFC 6544",
+          "extensions": "std::vector<std::pair<std::string, std::string>> — additional extension attributes (e.g., 'generation', 'network-id', 'network-cost')"
+        },
+        "rfcReference": "RFC 8445 (obsoletes RFC 5245) section 5.1"
+      },
+      "FingerprintAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=fingerprint line — DTLS certificate fingerprint",
+        "fields": {
+          "hashFunction": "std::string — hash algorithm (e.g., 'sha-256', 'sha-384', 'sha-512')",
+          "fingerprint": "std::string — hex-encoded fingerprint with colon separators (e.g., 'AB:CD:EF:...')"
+        },
+        "rfcReference": "RFC 4572 section 5"
+      },
+      "CryptoAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=crypto line — SDES-SRTP crypto attribute for key exchange",
+        "fields": {
+          "tag": "uint32_t — crypto attribute tag (identifies the crypto suite in offer/answer)",
+          "suite": "std::string — crypto suite name (e.g., 'AES_CM_128_HMAC_SHA1_80', 'AES_CM_128_HMAC_SHA1_32', 'AEAD_AES_256_GCM')",
+          "keyParams": "std::string — key parameters (e.g., 'inline:base64key|...')",
+          "sessionParams": "std::optional<std::string> — optional session parameters (e.g., 'UNENCRYPTED_SRTP', 'UNENCRYPTED_SRTCP')"
+        },
+        "rfcReference": "RFC 4568 (SDES key management for SRTP), RFC 3711 (SRTP protocol)"
+      },
+      "RtcpAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=rtcp line — explicit RTCP transport address when not using rtcp-mux",
+        "fields": {
+          "port": "uint16_t — RTCP port number",
+          "netType": "std::optional<NetworkType> — network type (optional, defaults to session-level)",
+          "addrType": "std::optional<AddressType> — address type (optional)",
+          "address": "std::optional<std::string> — RTCP address (optional, defaults to c= address)"
+        },
+        "rfcReference": "RFC 3605"
+      },
+      "MsidAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=msid line — WebRTC MediaStream identification",
+        "fields": {
+          "streamId": "std::string — MediaStream identifier (maps to MediaStream.id in the WebRTC API)",
+          "trackId": "std::optional<std::string> — MediaStreamTrack identifier (maps to MediaStreamTrack.id)"
+        },
+        "rfcReference": "RFC 8830"
+      },
+      "GroupAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=group line — SDP media grouping",
+        "fields": {
+          "semantics": "std::string — grouping semantics (e.g., 'BUNDLE', 'LS' for lip sync, 'FID' for flow identification)",
+          "mids": "std::vector<std::string> — list of mid values in the group"
+        },
+        "rfcReference": "RFC 5888, RFC 8843"
+      },
+      "SimulcastAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=simulcast line — simulcast negotiation for sending/receiving multiple encodings",
+        "fields": {
+          "sendStreams": "std::vector<std::vector<SimulcastStream>> — send streams, inner vector is alternatives (separated by , within ;-separated groups)",
+          "recvStreams": "std::vector<std::vector<SimulcastStream>> — recv streams, same structure"
+        },
+        "subTypes": {
+          "SimulcastStream": {
+            "rid": "std::string — restriction identifier referencing an a=rid line",
+            "paused": "bool — whether this stream starts in paused state (prefixed with '~')"
+          }
+        },
+        "rfcReference": "RFC 8853"
+      },
+      "RidAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Parsed a=rid line — restriction identifier for simulcast",
+        "fields": {
+          "id": "std::string — restriction identifier",
+          "direction": "RidDirection enum (SEND, RECV)",
+          "payloadTypes": "std::vector<uint8_t> — optional list of payload types this restriction applies to",
+          "restrictions": "std::unordered_map<std::string, std::string> — key=value restriction parameters (e.g., 'max-width=1280', 'max-height=720', 'max-fps=30')"
+        },
+        "rfcReference": "RFC 8851"
+      },
+      "GenericAttribute": {
+        "location": "include/iora/sdp/attributes.hpp",
+        "description": "Catch-all for unrecognized a= lines — preserves name and optional value as raw strings for round-trip fidelity",
+        "fields": {
+          "name": "std::string — attribute name (everything between 'a=' and ':' or end of line)",
+          "value": "std::optional<std::string> — attribute value (everything after ':', or absent for flag/property attributes)"
+        },
+        "notes": "Unknown attributes are stored here, preserving the original text. This ensures that proprietary or future extension attributes survive a parse-serialize round trip without loss."
+      }
+    },
+
+    "layer2_parser": {
+      "SdpParser": {
+        "location": "include/iora/sdp/sdp_parser.hpp",
+        "description": "Parses SDP text into a SessionDescription data model. Operates as a line-by-line state machine transitioning from session-level to media-level context on encountering an m= line.",
+        "interface": {
+          "parse(sdpText)": "static — parses std::string_view containing SDP text, returns ParseResult<SessionDescription>. Zero-copy where possible: string_view references into the input for transient parsing, but all stored strings in the data model are owned copies (because the input may be temporary).",
+          "parse(sdpText, options)": "static — parses with explicit SdpParserOptions controlling strict/lenient mode and other parsing behavior.",
+          "parseMediaSection(lines)": "static — parses a single media section (m= line and subsequent lines) into a MediaDescription. Useful for trickle ICE or incremental SDP processing.",
+          "parseAttribute(line)": "static — parses a single a= line into the appropriate typed attribute struct or GenericAttribute. Useful for attribute-level unit testing."
+        },
+        "parserOptions": {
+          "SdpParserOptions": {
+            "strict": "bool (default: false) — if true, reject the entire SDP on any malformed line. If false (lenient), skip bad lines and continue parsing.",
+            "requireVersion": "bool (default: true) — require v=0 as the first line",
+            "requireOrigin": "bool (default: true) — require an o= line",
+            "requireSessionName": "bool (default: true) — require an s= line",
+            "requireTiming": "bool (default: false) — require at least one t= line. WebRTC SDP from browsers sometimes omits timing.",
+            "maxLineLength": "size_t (default: 4096) — maximum allowed line length to prevent denial-of-service from malformed input",
+            "maxMediaSections": "size_t (default: 64) — maximum number of m= sections to prevent resource exhaustion"
+          }
+        },
+        "parseResult": {
+          "ParseResult<T>": {
+            "description": "Result type returned by parse operations — either a value or an error, plus accumulated warnings",
+            "fields": {
+              "value": "std::optional<T> — the parsed result (present on success)",
+              "error": "std::optional<ParseError> — fatal error if parsing failed",
+              "warnings": "std::vector<ParseWarning> — non-fatal issues encountered during lenient parsing"
+            }
+          },
+          "ParseError": {
+            "line": "size_t — line number where the error occurred",
+            "message": "std::string — human-readable error description"
+          },
+          "ParseWarning": {
+            "line": "size_t — line number where the warning occurred",
+            "message": "std::string — human-readable warning description"
+          }
+        },
+        "stateMachine": {
+          "description": "The parser operates as a line-by-line state machine with two phases",
+          "sessionPhase": "Lines before the first m= line are parsed as session-level fields (v=, o=, s=, i=, u=, e=, p=, c=, b=, t=, r=, z=, k=, a=). Attributes at session level are stored in SessionDescription.attributes and SessionDescription.groups.",
+          "mediaPhase": "On encountering an m= line, the parser transitions to media-level context. Subsequent lines (c=, b=, a=) apply to the current MediaDescription until the next m= line or end of input.",
+          "attributeDispatch": "For each a= line, the parser checks the attribute name against known constants. Known attributes (rtpmap, fmtp, rtcp-fb, extmap, ssrc, candidate, fingerprint, setup, ice-ufrag, ice-pwd, mid, msid, group, rtcp-mux, rtcp-mux-only, direction, crypto, simulcast, rid, extmap-allow-mixed, end-of-candidates, etc.) are parsed into their typed structs. Unknown attributes are stored as GenericAttribute."
+        },
+        "designNotes": [
+          "Input is processed via std::string_view for zero-copy line splitting, but all stored values in the data model own their strings (std::string) because the input buffer may be freed after parsing.",
+          "Lines are split on CRLF (RFC 4566 mandates CRLF) but the parser also tolerates bare LF for robustness.",
+          "Leading/trailing whitespace on lines is trimmed in lenient mode but rejected in strict mode.",
+          "Duplicate attributes that should be unique (e.g., ice-ufrag, mid) overwrite the previous value in lenient mode and produce a warning; they cause an error in strict mode.",
+          "Empty a= values (e.g., 'a=rtcp-mux') are correctly handled as flag/property attributes with no value."
+        ]
+      }
+    },
+
+    "layer3_serializer": {
+      "SdpSerializer": {
+        "location": "include/iora/sdp/sdp_serializer.hpp",
+        "description": "Serializes a SessionDescription data model into conformant SDP text (std::string). Produces output with correct field ordering per RFC 4566 section 5.",
+        "interface": {
+          "serialize(session)": "static — serializes a SessionDescription to SDP text (std::string). Fields are emitted in RFC-mandated order.",
+          "serialize(session, options)": "static — serializes with explicit SdpSerializerOptions.",
+          "serializeMediaSection(media)": "static — serializes a single MediaDescription to SDP text. Useful for trickle ICE candidate announcement.",
+          "serializeAttribute(attr)": "static — serializes a single typed attribute to its a= line representation."
+        },
+        "serializerOptions": {
+          "SdpSerializerOptions": {
+            "lineEnding": "std::string (default: '\\r\\n') — line ending sequence. RFC 4566 mandates CRLF but some applications require bare LF.",
+            "omitSessionName": "bool (default: false) — omit the s= line if sessionName is empty (technically non-conformant but some WebRTC implementations do this)",
+            "omitTiming": "bool (default: false) — omit t= lines (non-conformant but tolerated by some WebRTC stacks)"
+          }
+        },
+        "fieldOrder": {
+          "description": "Serialization order per RFC 4566 section 5",
+          "sessionLevel": ["v=", "o=", "s=", "i=", "u=", "e=", "p=", "c=", "b=", "t=", "r=", "z=", "k=", "a="],
+          "mediaLevel": ["m=", "i=", "c=", "b=", "k=", "a="],
+          "attributeOrder": "Within the a= lines, attributes are emitted in a conventional order: direction, mid, msid, ice-ufrag, ice-pwd, ice-options, ice-lite, fingerprint, setup, extmap-allow-mixed, rtcp-mux, rtcp-mux-only, rtcp-rsize, rtcp, group, extmap, rtpmap+fmtp+rtcp-fb (grouped by payload type), ssrc, ssrc-group, crypto, simulcast, rid, candidate, end-of-candidates, then generic attributes. This is a convention for readability, not a requirement."
+        },
+        "designNotes": [
+          "The serializer is the inverse of the parser — parse(serialize(session)) should produce an equivalent SessionDescription.",
+          "Numeric fields are serialized without leading zeros.",
+          "ICE candidates are serialized with all standard fields including optional raddr/rport, tcptype, and extension attributes.",
+          "String values containing the = character are handled correctly (the value portion of attribute lines may contain = signs).",
+          "The serializer never emits empty lines or trailing whitespace."
+        ]
+      }
+    },
+
+    "layer4_offerAnswer": {
+      "description": "Stateless utility functions for common SDP operations in WebRTC and SIP contexts. These helpers manipulate SessionDescription objects but do NOT implement a negotiation state machine. The application is responsible for driving the offer/answer flow.",
+      "location": "include/iora/sdp/offer_answer.hpp",
+
+      "createOffer": {
+        "signature": "SessionDescription createOffer(const OfferOptions& options)",
+        "description": "Scaffold a new SessionDescription with sensible defaults for a WebRTC or SIP offer. Session ID generation uses std::random_device + std::mt19937 to produce a random uint64 sess-id value for the o= line.",
+        "options": {
+          "OfferOptions": {
+            "audio": "bool (default: true) — include an audio m= section",
+            "video": "bool (default: true) — include a video m= section",
+            "dataChannel": "bool (default: false) — include an application m= section for SCTP data channels",
+            "iceUfrag": "std::optional<std::string> — ICE username fragment (generated if not provided)",
+            "icePwd": "std::optional<std::string> — ICE password (generated if not provided)",
+            "fingerprint": "std::optional<FingerprintAttribute> — DTLS fingerprint (required for WebRTC)",
+            "bundlePolicy": "bool (default: true) — add a=group:BUNDLE for all media sections",
+            "rtcpMux": "bool (default: true) — add a=rtcp-mux to all media sections",
+            "dtlsSetup": "SetupRole (default: ACTPASS) — a=setup value for the offer"
+          }
+        },
+        "notes": "Creates a minimal valid SessionDescription skeleton. The application adds codecs (rtpmap, fmtp), ICE candidates, and any additional attributes. This is a convenience scaffold, not a complete offer."
+      },
+      "createAnswer": {
+        "signature": "SessionDescription createAnswer(const SessionDescription& offer, const AnswerOptions& answerOptions)",
+        "description": "Generate an SDP answer from a received offer. Intersects codecs per media section (retaining answerer preference order), mirrors ICE credentials, sets direction by flipping the offer's direction (sendonly->recvonly, recvonly->sendonly, sendrecv->sendrecv, inactive->inactive), and copies BUNDLE group if present.",
+        "options": {
+          "AnswerOptions": {
+            "iceUfrag": "std::optional<std::string> — answerer's ICE username fragment (generated if not provided)",
+            "icePwd": "std::optional<std::string> — answerer's ICE password (generated if not provided)",
+            "fingerprint": "std::optional<FingerprintAttribute> — answerer's DTLS fingerprint",
+            "dtlsSetup": "SetupRole (default: ACTIVE) — a=setup value for the answer (typically ACTIVE when offer is ACTPASS)",
+            "supportedCodecs": "std::optional<std::vector<RtpMapAttribute>> — answerer's supported codecs for intersection. If not provided, all offered codecs are accepted.",
+            "rejectMediaTypes": "std::vector<MediaType> — media types to reject (port set to 0)"
+          }
+        },
+        "notes": "Produces a conformant answer skeleton. The application may further modify the answer before serialization. Media sections with no codec overlap are automatically rejected (port 0)."
+      },
+      "matchCodecs": {
+        "signature": "std::vector<RtpMapAttribute> matchCodecs(const MediaDescription& offer, const MediaDescription& answer)",
+        "description": "Intersect codec lists between an offer and answer media section. Returns codecs present in both, ordered by the answerer's preference.",
+        "notes": "Matching is by encoding name (case-insensitive) and clock rate. For dynamic payload types, the answerer's payload type numbers are used in the result. fmtp compatibility is NOT checked — the application should verify fmtp parameters if needed."
+      },
+      "addIceCandidate": {
+        "signature": "void addIceCandidate(MediaDescription& media, const IceCandidate& candidate)",
+        "description": "Append a trickle ICE candidate to a MediaDescription's candidate list.",
+        "notes": "Simple append — no duplicate detection. The application should check for duplicate candidates if needed."
+      },
+      "addTransceiver": {
+        "signature": "MediaDescription addTransceiver(MediaType type, const TransceiverOptions& options)",
+        "description": "Create a new MediaDescription with WebRTC defaults (BUNDLE-ready, rtcp-mux, DTLS-SRTP, ICE attributes)",
+        "options": {
+          "TransceiverOptions": {
+            "mid": "std::string — media identification tag",
+            "direction": "Direction (default: SENDRECV) — media direction",
+            "protocol": "TransportProtocol (default: UDP_TLS_RTP_SAVPF) — transport protocol",
+            "iceUfrag": "std::optional<std::string> — ICE username fragment",
+            "icePwd": "std::optional<std::string> — ICE password",
+            "fingerprint": "std::optional<FingerprintAttribute> — DTLS fingerprint",
+            "setup": "SetupRole (default: ACTPASS) — DTLS role",
+            "msid": "std::optional<MsidAttribute> — MediaStream identification"
+          }
+        },
+        "notes": "Returns a MediaDescription skeleton with WebRTC boilerplate attributes pre-populated. The application adds codecs (rtpmap, fmtp, rtcp-fb) and ICE candidates."
+      },
+      "pruneUnusedCodecs": {
+        "signature": "void pruneUnusedCodecs(MediaDescription& media, const std::vector<uint8_t>& retainPayloadTypes)",
+        "description": "Remove rtpmap, fmtp, and rtcp-fb entries for payload types not in the retain list. Also removes the payload type from the m= line format list.",
+        "notes": "Used after codec negotiation to clean up an answer SDP, removing codecs that were not selected."
+      },
+      "addDataChannel": {
+        "signature": "MediaDescription addDataChannel(const DataChannelOptions& options)",
+        "description": "Create a MediaDescription for SCTP data channels per RFC 8841",
+        "options": {
+          "DataChannelOptions": {
+            "mid": "std::string — media identification tag",
+            "sctpPort": "uint16_t (default: 5000) — SCTP port",
+            "maxMessageSize": "uint32_t (default: 262144) — max message size in bytes",
+            "iceUfrag": "std::optional<std::string>",
+            "icePwd": "std::optional<std::string>",
+            "fingerprint": "std::optional<FingerprintAttribute>",
+            "setup": "SetupRole (default: ACTPASS)"
+          }
+        },
+        "notes": "Produces a conformant application/webrtc-datachannel media section with DTLS/SCTP transport."
+      },
+      "setMediaDirection": {
+        "signature": "void setMediaDirection(MediaDescription& media, Direction direction)",
+        "description": "Set the direction attribute of a media section, removing any existing direction attribute.",
+        "notes": "Convenience for offer/answer flows where direction must be flipped (sendonly -> recvonly, etc.)."
+      },
+      "flipDirection": {
+        "signature": "Direction flipDirection(Direction direction)",
+        "description": "Flip an SDP direction for offer/answer: sendrecv->sendrecv, sendonly->recvonly, recvonly->sendonly, inactive->inactive.",
+        "notes": "Per RFC 3264, an answerer flips the direction of each media section from the offer. sendrecv and inactive are symmetric."
+      },
+      "disableMedia": {
+        "signature": "void disableMedia(MediaDescription& media)",
+        "description": "Set port to 0 to reject a media section per RFC 3264 section 6.",
+        "notes": "Used in answer generation to reject unwanted media sections. Direction is also set to INACTIVE."
+      },
+      "findMediaByMid": {
+        "signature": "MediaDescription* findMediaByMid(SessionDescription& session, const std::string& mid)",
+        "description": "Look up a media section by its a=mid value. Returns a pointer to the matching MediaDescription, or nullptr if not found.",
+        "notes": "Linear search through mediaDescriptions. For BUNDLE-aware applications, use this to find specific media sections by their mid tag."
+      },
+      "generateIceCredentials": {
+        "signature": "std::pair<std::string, std::string> generateIceCredentials()",
+        "description": "Generate random ICE credentials: ice-ufrag (4+ characters) and ice-pwd (22+ characters) per RFC 8445 section 5.3.",
+        "notes": "Uses std::random_device + std::mt19937 as the random source. Characters are drawn from [a-zA-Z0-9+/]. The generated values meet the minimum length requirements specified by RFC 8445."
+      },
+      "removeIceCandidates": {
+        "signature": "void removeIceCandidates(MediaDescription& media)",
+        "description": "Clear all ICE candidates from a media section. Resets the candidates vector and sets endOfCandidates to false.",
+        "notes": "Used for ICE restart scenarios where the application needs to clear existing candidates before gathering new ones."
+      },
+      "isMediaDisabled": {
+        "signature": "bool isMediaDisabled(const MediaDescription& media)",
+        "description": "Check if a media section is disabled (port = 0).",
+        "notes": "Per RFC 3264 section 6, a port of 0 means the media section is rejected or disabled."
+      }
+    }
+  },
+
+  "rfcCoverage": {
+    "description": "Detailed RFC coverage by iora_sdp. Each RFC lists the specific SDP features handled by the parser, serializer, and data model.",
+
+    "core": {
+      "RFC4566_RFC8866": {
+        "title": "SDP: Session Description Protocol",
+        "coverage": "Full",
+        "details": [
+          "All session-level fields: v=, o=, s=, i=, u=, e=, p=, c=, b=, t=, r=, z=, k=, a=",
+          "All media-level fields: m=, i=, c=, b=, k=, a=",
+          "Field ordering per section 5",
+          "Attribute syntax: property attributes (flag) and value attributes (name:value)",
+          "CRLF line endings (with bare LF tolerance in lenient mode)",
+          "Multiple m= sections with independent attribute scopes",
+          "Session-level vs media-level attribute inheritance (e.g., c= line)",
+          "k= line parsed for backward compatibility (deprecated in RFC 8866)",
+          "r= repeat time lines within time descriptions",
+          "z= time zone adjustment lines",
+          "Multicast c= line fields: TTL and number of addresses"
+        ]
+      },
+      "RFC3264": {
+        "title": "An Offer/Answer Model with the Session Description Protocol (SDP)",
+        "coverage": "Data model and utilities — NOT a state machine",
+        "details": [
+          "Direction attribute semantics: sendrecv, sendonly, recvonly, inactive",
+          "Port 0 for rejected media sections",
+          "Codec intersection via matchCodecs() utility",
+          "Answer generation via createAnswer() utility with direction flipping",
+          "Answer direction flipping via flipDirection() helper",
+          "Hold/unhold via direction manipulation",
+          "Media rejection via disableMedia() helper",
+          "The library does NOT implement the offer/answer state machine itself — it provides tools for applications that implement it"
+        ]
+      }
+    },
+
+    "ice": {
+      "RFC8445": {
+        "title": "Interactive Connectivity Establishment (ICE) (obsoletes RFC 5245)",
+        "coverage": "SDP attribute parsing/serialization only — no ICE agent",
+        "details": [
+          "a=candidate parsing with all fields: foundation, component, transport, priority, address, port, type, raddr, rport, tcptype, extensions",
+          "a=ice-ufrag and a=ice-pwd parsing/serialization",
+          "a=ice-options parsing (e.g., 'trickle', 'ice2')",
+          "a=ice-lite flag attribute",
+          "a=end-of-candidates flag attribute",
+          "Candidate extensions (generation, network-id, network-cost, ufrag) preserved in IceCandidate.extensions",
+          "Both session-level and media-level ICE attributes supported",
+          "ICE credential generation (generateIceCredentials) with minimum length requirements per section 5.3",
+          "ICE candidate removal for ICE restart scenarios (removeIceCandidates)"
+        ]
+      },
+      "RFC6544": {
+        "title": "TCP Candidates with Interactive Connectivity Establishment (ICE)",
+        "coverage": "SDP attribute parsing/serialization",
+        "details": [
+          "TCP candidate type (tcptype) attribute on IceCandidate: active, passive, so",
+          "IceTransportType enum includes TCP",
+          "TCP candidates parsed and serialized with tcptype extension"
+        ]
+      }
+    },
+
+    "dtls": {
+      "RFC4572": {
+        "title": "Connection-Oriented Media Transport over TLS in SDP",
+        "coverage": "Full attribute support",
+        "details": [
+          "a=fingerprint parsing with hash function (sha-256, sha-384, sha-512) and hex fingerprint",
+          "Fingerprint format validation (colon-separated hex pairs)",
+          "Multiple fingerprint attributes allowed (different hash algorithms)",
+          "Both session-level and media-level fingerprint attributes"
+        ]
+      },
+      "RFC4145": {
+        "title": "TCP-Based Media Transport in SDP",
+        "coverage": "setup attribute only",
+        "details": [
+          "a=setup parsing: active, passive, actpass, holdconn",
+          "Used in WebRTC for DTLS role negotiation"
+        ]
+      }
+    },
+
+    "rtpExtensions": {
+      "RFC5761": {
+        "title": "Multiplexing RTP Data and Control Packets on a Single Port",
+        "coverage": "Attribute parsing/serialization",
+        "details": [
+          "a=rtcp-mux flag attribute parsed and stored as boolean on MediaDescription",
+          "Required for WebRTC per JSEP"
+        ]
+      },
+      "RFC8858": {
+        "title": "Indicating Exclusive Support of RTP and RTCP Multiplexing",
+        "coverage": "Attribute parsing/serialization",
+        "details": [
+          "a=rtcp-mux-only flag attribute parsed and stored as boolean on MediaDescription",
+          "Indicates that the endpoint only supports rtcp-mux and cannot fall back to separate RTP/RTCP ports"
+        ]
+      },
+      "RFC5888": {
+        "title": "The Session Description Protocol (SDP) Grouping Framework",
+        "coverage": "Full",
+        "details": [
+          "a=group parsing with semantics and mid list",
+          "BUNDLE semantics (RFC 8843)",
+          "LS (lip sync) and FID (flow identification) semantics",
+          "Session-level group attributes stored on SessionDescription"
+        ]
+      },
+      "RFC3605": {
+        "title": "Real Time Control Protocol (RTCP) Attribute in SDP",
+        "coverage": "Full",
+        "details": [
+          "a=rtcp parsing with port, optional network type, address type, and address",
+          "Used when RTP and RTCP are on separate ports (pre-rtcp-mux)"
+        ]
+      },
+      "RFC4585": {
+        "title": "Extended RTP Profile for RTCP-Based Feedback (RTP/AVPF)",
+        "coverage": "Attribute parsing/serialization",
+        "details": [
+          "a=rtcp-fb parsing with payload type (or *), feedback type, and optional subtype",
+          "Standard feedback types: nack, nack pli, nack sli, nack rpsi, ccm fir",
+          "Non-standard/proprietary feedback types: goog-remb (Google REMB), transport-cc (transport-wide congestion control)",
+          "Per-payload-type and wildcard (*) feedback declarations"
+        ]
+      },
+      "RFC5576": {
+        "title": "Source-Specific Media Attributes in SDP",
+        "coverage": "Full",
+        "details": [
+          "a=ssrc parsing with SSRC, attribute name, and optional value",
+          "Common attributes: cname, msid, label, mslabel",
+          "a=ssrc-group parsing with semantics and SSRC list",
+          "Semantics: FID (flow identification), SIM (simulcast — legacy Chrome)"
+        ]
+      },
+      "RFC5285_RFC8285": {
+        "title": "A General Mechanism for RTP Header Extensions",
+        "coverage": "SDP negotiation attributes",
+        "details": [
+          "a=extmap parsing with ID, optional direction, URI, and optional extension attributes",
+          "One-byte (ID 1-14) and two-byte (ID 1-255) header extension forms",
+          "a=extmap-allow-mixed flag attribute (RFC 8285) at both session and media level",
+          "Common WebRTC extensions: urn:ietf:params:rtp-hdrext:ssrc-audio-level, urn:ietf:params:rtp-hdrext:toffset, http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time, urn:3gpp:video-orientation, urn:ietf:params:rtp-hdrext:sdes:mid, urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+        ]
+      },
+      "RFC5506": {
+        "title": "Support for Reduced-Size RTCP",
+        "coverage": "Attribute parsing",
+        "details": [
+          "a=rtcp-rsize flag attribute parsed and stored as boolean on MediaDescription"
+        ]
+      }
+    },
+
+    "srtp": {
+      "RFC4568": {
+        "title": "Session Description Protocol (SDP) Security Descriptions for Media Streams",
+        "coverage": "SDP crypto attribute parsing/serialization",
+        "details": [
+          "a=crypto parsing: tag, crypto suite name, key parameters, optional session parameters",
+          "Suites: AES_CM_128_HMAC_SHA1_80, AES_CM_128_HMAC_SHA1_32, AEAD_AES_128_GCM, AEAD_AES_256_GCM",
+          "Key parameter parsing (inline:base64 format)",
+          "SDES-SRTP is legacy — WebRTC uses DTLS-SRTP. Supported for SIP interop."
+        ]
+      },
+      "RFC3711": {
+        "title": "The Secure Real-time Transport Protocol (SRTP)",
+        "coverage": "Referenced by crypto attribute — no SRTP implementation",
+        "details": [
+          "RFC 3711 defines the SRTP protocol. iora_sdp parses the a=crypto attribute (defined by RFC 4568) which references SRTP crypto suites from RFC 3711.",
+          "No SRTP encryption/decryption is performed by iora_sdp."
+        ]
+      },
+      "RFC6904": {
+        "title": "Encryption of Header Extensions in SRTP",
+        "coverage": "Attribute awareness",
+        "details": [
+          "a=extmap-allow-encrypted flag attribute recognized and preserved",
+          "Actual header extension encryption is an SRTP concern, not SDP"
+        ]
+      }
+    },
+
+    "webrtc": {
+      "RFC7742": {
+        "title": "WebRTC Video Processing and Codec Requirements",
+        "coverage": "Informational — influences default codec lists in offer utilities",
+        "details": [
+          "VP8 support mandatory for WebRTC video (reflected in createOffer defaults)",
+          "H.264 Constrained Baseline Profile support mandatory",
+          "These requirements inform the offer/answer utilities but are not enforced by the parser/serializer"
+        ]
+      },
+      "RFC8829": {
+        "title": "JavaScript Session Establishment Protocol (JSEP)",
+        "coverage": "SDP conventions for WebRTC",
+        "details": [
+          "BUNDLE group semantics in SDP offer/answer",
+          "rtcp-mux required for all media",
+          "DTLS-SRTP via fingerprint + setup attributes",
+          "ICE credential attributes (ice-ufrag, ice-pwd) at media level",
+          "a=mid attribute mandatory for BUNDLE",
+          "Plan B vs Unified Plan: iora_sdp data model supports Unified Plan (one m= section per track). Legacy Plan B (multiple tracks per m= section via ssrc) can be parsed but the offer/answer utilities target Unified Plan.",
+          "SDP munging patterns supported by the data model's mutability"
+        ]
+      },
+      "RFC8830": {
+        "title": "WebRTC MediaStream Identification in SDP",
+        "coverage": "Full",
+        "details": [
+          "a=msid parsing with stream ID and optional track ID",
+          "Multiple a=msid lines per media section (Unified Plan)",
+          "Media-level msid attribute on MediaDescription (std::vector<MsidAttribute>)",
+          "Handles both RFC 8830 format (a=msid:streamId trackId) and legacy (a=ssrc:NNN msid:streamId trackId)"
+        ]
+      },
+      "RFC8841": {
+        "title": "Session Description Protocol (SDP) Offer/Answer for SCTP over DTLS",
+        "coverage": "Full attribute support",
+        "details": [
+          "m=application with UDP/DTLS/SCTP and webrtc-datachannel format",
+          "a=sctp-port attribute",
+          "a=max-message-size attribute",
+          "Legacy a=sctpmap attribute (pre-RFC 8841 browsers) recognized in lenient mode",
+          "addDataChannel() utility creates conformant data channel media sections"
+        ]
+      },
+      "RFC8843": {
+        "title": "Negotiating Media Multiplexing Using the SDP",
+        "coverage": "BUNDLE grouping",
+        "details": [
+          "a=group:BUNDLE parsing and serialization",
+          "BUNDLE tag (mid) references validated against media sections",
+          "addTransceiver() utility creates BUNDLE-ready media sections",
+          "createOffer() utility adds BUNDLE group for all media sections when bundlePolicy is true"
+        ]
+      }
+    },
+
+    "simulcast": {
+      "RFC8853": {
+        "title": "Using Simulcast in SDP and RTP Sessions",
+        "coverage": "SDP attribute parsing/serialization",
+        "details": [
+          "a=simulcast parsing with send/recv stream lists",
+          "Nested stream structure: outer vector is ;-separated groups, inner vector is ,-separated alternatives",
+          "SimulcastStream with rid reference and paused state",
+          "a=rid parsing with direction (RidDirection enum), payload types, and restriction parameters",
+          "Integration with extmap for rtp-stream-id and repaired-rtp-stream-id header extensions"
+        ]
+      }
+    }
+  },
+
+  "directoryStructure": {
+    "description": "Complete directory layout for the iora_sdp project",
+    "tree": {
+      "iora_sdp/": {
+        "include/": {
+          "iora/": {
+            "sdp/": {
+              "types.hpp": "Layer 0 — Enums (MediaType, TransportProtocol, NetworkType, AddressType, Direction, SetupRole, BandwidthType, IceCandidateType, IceTransportType, RidDirection), attribute name constants, common value types",
+              "attributes.hpp": "Layer 1 — Typed attribute structs: RtpMapAttribute, FmtpAttribute, RtcpFbAttribute, ExtMapAttribute, SsrcAttribute, SsrcGroupAttribute, IceCandidate, FingerprintAttribute, CryptoAttribute, RtcpAttribute, MsidAttribute, GroupAttribute, SimulcastAttribute, RidAttribute, GenericAttribute",
+              "session_description.hpp": "Layer 1 — SessionDescription, MediaDescription, Origin, ConnectionData, BandwidthInfo, TimeDescription, RepeatTime, ZoneAdjustment. Includes types.hpp and attributes.hpp.",
+              "sdp_parser.hpp": "Layer 2 — SdpParser with parse(), parseMediaSection(), parseAttribute(). SdpParserOptions, ParseResult, ParseError, ParseWarning. Includes session_description.hpp.",
+              "sdp_serializer.hpp": "Layer 3 — SdpSerializer with serialize(), serializeMediaSection(), serializeAttribute(). SdpSerializerOptions. Includes session_description.hpp.",
+              "offer_answer.hpp": "Layer 4 — Utility functions: createOffer(), createAnswer(), matchCodecs(), addIceCandidate(), addTransceiver(), pruneUnusedCodecs(), addDataChannel(), setMediaDirection(), flipDirection(), disableMedia(), findMediaByMid(), generateIceCredentials(), removeIceCandidates(), isMediaDisabled(). OfferOptions, AnswerOptions, TransceiverOptions, DataChannelOptions. Includes session_description.hpp."
+            }
+          }
+        },
+        "tests/": {
+          "test_types.cpp": "Unit tests for Layer 0 enums, constants, and type conversions",
+          "test_attributes.cpp": "Unit tests for each typed attribute struct — construction, field access, equality, edge cases",
+          "test_parser.cpp": "Unit tests for SdpParser — session-level parsing, media-level parsing, attribute dispatch, lenient vs strict mode, error/warning accumulation, malformed input handling",
+          "test_serializer.cpp": "Unit tests for SdpSerializer — field ordering, attribute serialization, edge cases, options (line endings, omissions)",
+          "test_round_trip.cpp": "Round-trip tests — parse SDP text, serialize back, compare. Verifies parse(serialize(parse(input))) == parse(input) for various SDP documents",
+          "test_offer_answer.cpp": "Unit tests for Layer 4 utilities — createOffer defaults, createAnswer generation, matchCodecs intersection, addIceCandidate, addTransceiver, pruneUnusedCodecs, addDataChannel, direction helpers, flipDirection, disableMedia, findMediaByMid, generateIceCredentials, removeIceCandidates, negative test cases (zero codec overlap, empty media, invalid input)",
+          "test_webrtc_sdp.cpp": "Real-world SDP samples from Chrome, Firefox, Safari, and minimal/maximal SDP with all extensions. Verifies that the parser handles production browser SDP correctly and round-trips faithfully.",
+          "fuzz_parser.cpp": "Fuzz testing harness for the SDP parser, compatible with AFL and libFuzzer. Feeds arbitrary byte sequences into SdpParser::parse() to discover crashes, hangs, and undefined behavior in the network-facing parser."
+        },
+        "docs/": {
+          "architecture.json": "This file — comprehensive architecture document"
+        },
+        "CMakeLists.txt": "Top-level CMake build configuration"
+      }
+    }
+  },
+
+  "buildConfiguration": {
+    "cmakeTargets": {
+      "iora_sdp": {
+        "type": "INTERFACE library (header-only)",
+        "includeDirectories": ["include/"],
+        "dependencies": [],
+        "notes": "Consumers add target_link_libraries(myapp PRIVATE iora_sdp) and get the iora_sdp include path. No external dependencies required — pure C++17 standard library."
+      },
+      "sdp_tests": {
+        "type": "Executable",
+        "sources": ["tests/test_types.cpp", "tests/test_attributes.cpp", "tests/test_parser.cpp", "tests/test_serializer.cpp", "tests/test_round_trip.cpp", "tests/test_offer_answer.cpp", "tests/test_webrtc_sdp.cpp"],
+        "dependencies": ["iora_sdp", "Catch2"],
+        "notes": "Catch2 fetched via FetchContent."
+      },
+      "fuzz_parser": {
+        "type": "Executable (optional, built with IORA_SDP_BUILD_FUZZ=ON)",
+        "sources": ["tests/fuzz_parser.cpp"],
+        "dependencies": ["iora_sdp"],
+        "notes": "Fuzz testing target compatible with AFL and libFuzzer. Requires a fuzzing-capable compiler (clang with -fsanitize=fuzzer)."
+      }
+    },
+    "cmakeOptions": {
+      "IORA_SDP_BUILD_TESTS": {"default": "ON", "description": "Build test executables"},
+      "IORA_SDP_BUILD_EXAMPLES": {"default": "OFF", "description": "Build example programs"},
+      "IORA_SDP_BUILD_FUZZ": {"default": "OFF", "description": "Build fuzz testing targets (requires clang with libFuzzer support)"}
+    },
+    "buildCommands": {
+      "quickBuild": "cmake -S . -B build && cmake --build build -j$(nproc)",
+      "runTests": "cd build && ctest --output-on-failure",
+      "directTestRun": "./build/tests/sdp_tests",
+      "sanitizerBuild_asan": "cmake -S . -B build-asan -DCMAKE_CXX_FLAGS='-fsanitize=address -fno-omit-frame-pointer' && cmake --build build-asan",
+      "sanitizerBuild_ubsan": "cmake -S . -B build-ubsan -DCMAKE_CXX_FLAGS='-fsanitize=undefined' && cmake --build build-ubsan",
+      "sanitizerBuild_tsan": "cmake -S . -B build-tsan -DCMAKE_CXX_FLAGS='-fsanitize=thread' && cmake --build build-tsan",
+      "fuzzBuild": "cmake -S . -B build-fuzz -DIORA_SDP_BUILD_FUZZ=ON -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS='-fsanitize=fuzzer,address' && cmake --build build-fuzz"
+    }
+  },
+
+  "testingStrategy": {
+    "framework": "Catch2 (fetched via CMake FetchContent)",
+    "unitTests": [
+      "Layer 0 types: enum to/from string conversion, constant values, default construction",
+      "Attribute structs: construction with all fields, default values, equality comparison, copy/move semantics",
+      "Parser — session-level: v=, o=, s=, i=, u=, e=, p=, c=, b=, t=, r=, z=, k= line parsing with valid and malformed input",
+      "Parser — media-level: m= line with various media types, protocols, and format lists",
+      "Parser — attribute dispatch: each known attribute type parsed individually via parseAttribute()",
+      "Parser — rtpmap: payload type, encoding name, clock rate, optional channels",
+      "Parser — fmtp: raw parameters and key=value map population",
+      "Parser — rtcp-fb: all feedback types (nack, nack pli, ccm fir, transport-cc, goog-remb), wildcard payload type",
+      "Parser — extmap: ID, optional direction, URI, extension attributes",
+      "Parser — ssrc: SSRC number, attribute name/value pairs (cname, msid, label)",
+      "Parser — candidate: full ICE candidate with all fields including raddr/rport, tcptype, and extensions",
+      "Parser — fingerprint: hash function and hex fingerprint validation",
+      "Parser — crypto: tag, suite, key params, session params",
+      "Parser — ice attributes: ice-ufrag, ice-pwd, ice-options, ice-lite",
+      "Parser — setup: active, passive, actpass, holdconn",
+      "Parser — direction: sendrecv, sendonly, recvonly, inactive as flag attributes",
+      "Parser — msid: stream ID and optional track ID, multiple msid lines per media section",
+      "Parser — group: BUNDLE and other semantics with mid lists",
+      "Parser — simulcast and rid: send/recv streams with paused state, restriction parameters, nested alternatives",
+      "Parser — data channel: sctp-port, max-message-size, legacy sctpmap",
+      "Parser — session-level ICE/DTLS: ice-ufrag, ice-pwd, ice-options, ice-lite, fingerprint, setup, extmap-allow-mixed at session level",
+      "Parser — repeat times (r=) and zone adjustments (z=)",
+      "Parser — encryption key (k=) parsed for backward compatibility",
+      "Parser — multicast c= line with TTL and number of addresses",
+      "Parser — generic attributes: unknown attribute names preserved as GenericAttribute",
+      "Parser — strict mode: malformed lines cause parse failure with error details",
+      "Parser — lenient mode: malformed lines skipped with warnings, rest of SDP parsed correctly",
+      "Parser — limits: maxLineLength and maxMediaSections enforcement",
+      "Serializer — field ordering: v=, o=, s= before c=, b=, t= before a=, then m= blocks",
+      "Serializer — attribute ordering: conventional order within a= lines",
+      "Serializer — round-trip fidelity: serialize(parse(input)) produces equivalent SDP",
+      "Serializer — options: CRLF vs LF line endings, optional field omission",
+      "Offer/answer — createOffer: default options produce valid SDP with correct structure",
+      "Offer/answer — createAnswer: answer generated from offer with correct direction flipping, codec intersection, ICE credential mirroring",
+      "Offer/answer — matchCodecs: intersection of codec lists by name and clock rate",
+      "Offer/answer — addIceCandidate: candidate appended correctly to media section",
+      "Offer/answer — addTransceiver: WebRTC defaults applied (rtcp-mux, BUNDLE-ready, DTLS attributes)",
+      "Offer/answer — pruneUnusedCodecs: unmatched payload types removed from m= line and all attribute lists",
+      "Offer/answer — addDataChannel: conformant data channel media section per RFC 8841",
+      "Offer/answer — direction helpers: setMediaDirection, flipDirection, isMediaDisabled",
+      "Offer/answer — disableMedia: port set to 0, direction set to inactive",
+      "Offer/answer — findMediaByMid: lookup by mid value, nullptr for missing mid",
+      "Offer/answer — generateIceCredentials: minimum length requirements, character set validation",
+      "Offer/answer — removeIceCandidates: candidates cleared, endOfCandidates reset"
+    ],
+    "negativeTests": [
+      "Offer/answer — createAnswer with zero codec overlap: media section rejected with port 0",
+      "Offer/answer — createAnswer with empty media descriptions: produces valid but minimal answer",
+      "Offer/answer — matchCodecs with completely disjoint codec lists: returns empty result",
+      "Offer/answer — findMediaByMid with nonexistent mid: returns nullptr",
+      "Offer/answer — disableMedia on already-disabled media: idempotent operation",
+      "Offer/answer — pruneUnusedCodecs with empty retain list: all codecs removed",
+      "Parser — completely empty input: returns error",
+      "Parser — garbage input (non-SDP text): returns error in strict, partial result in lenient",
+      "Parser — truncated SDP (cut off mid-line): handled gracefully",
+      "Parser — extremely large number of candidates: bounded by parser limits"
+    ],
+    "roundTripTests": [
+      "Minimal SDP: v=, o=, s=, t=, single m= line with one codec — parse, serialize, compare",
+      "Full WebRTC SDP: all extensions (BUNDLE, rtcp-mux, ICE, DTLS, extmap, ssrc, rtcp-fb) — parse, serialize, re-parse, compare data models",
+      "Multi-media SDP: audio + video + data channel — verify all sections round-trip",
+      "Unknown attributes: SDP with proprietary a= lines — verify preserved through round-trip",
+      "IPv6 SDP: connection addresses with IPv6 notation — verify correct parsing and serialization",
+      "SIP SDP: plain SIP SDP without WebRTC extensions — verify no WebRTC-specific attributes injected",
+      "SDP with k= line: encryption key round-trips correctly despite being deprecated",
+      "SDP with r= and z= lines: repeat times and zone adjustments round-trip correctly",
+      "SDP with multicast c= line: TTL and number of addresses round-trip correctly"
+    ],
+    "realWorldSdpTests": [
+      "Chrome offer: full SDP from Chrome M120+ with Unified Plan, BUNDLE, rtcp-mux, all standard extensions",
+      "Firefox offer: full SDP from Firefox with its specific attribute ordering and extension preferences",
+      "Safari offer: full SDP from Safari with its WebRTC implementation quirks",
+      "Minimal SDP: bare-minimum valid SDP (v=, o=, s=, t=, m= with one codec) to test parser robustness",
+      "Maximal SDP: SDP with every supported attribute type to verify complete parsing coverage",
+      "SIP SDP: SDP from a SIP phone (e.g., Ooma, Polycom) without WebRTC extensions",
+      "Data channel only: SDP for SCTP data channels without audio/video"
+    ],
+    "edgeCaseTests": [
+      "Missing optional fields: no session info (i=), no URI (u=), no email (e=), no phone (p=)",
+      "Multiple m= lines: 3+ media sections with different types and independent attributes",
+      "Unknown attributes preserved: proprietary a=x-custom-attr:value survives round-trip",
+      "IPv6 addresses in c= and candidate lines",
+      "Large SDP: 50+ candidates, 20+ codecs — verify no parsing performance degradation",
+      "Empty attribute values: a=rtcp-mux (flag) vs a=mid:0 (value)",
+      "Duplicate attributes: multiple a=candidate, a=ssrc, a=rtcp-fb (valid) vs duplicate a=ice-ufrag (warning in lenient, error in strict)",
+      "Bare LF line endings: non-RFC-compliant but common in practice",
+      "Trailing whitespace on lines",
+      "Very long lines exceeding maxLineLength",
+      "Non-ASCII characters in session name or info fields",
+      "Port 0 for disabled media sections",
+      "Zero candidates (ICE not yet gathered)",
+      "Multiple a=msid lines per media section (Unified Plan)",
+      "Multiple a=fingerprint lines with different hash algorithms",
+      "TCP ICE candidates with tcptype attribute"
+    ],
+    "fuzzTesting": {
+      "description": "Fuzz testing for the network-facing SDP parser to discover crashes, hangs, assertion failures, and undefined behavior.",
+      "harness": "tests/fuzz_parser.cpp",
+      "engines": ["AFL (American Fuzzy Lop)", "libFuzzer (LLVM integrated fuzzer)"],
+      "target": "SdpParser::parse() — the primary entry point for untrusted SDP input from network peers",
+      "notes": "The parser processes untrusted input from network peers (SIP INVITE bodies, WebRTC signaling messages). Fuzz testing is essential for ensuring robustness against malformed, truncated, and adversarial SDP payloads. The fuzz harness feeds arbitrary byte sequences into the parser in lenient mode and verifies that it does not crash, hang, or exhibit undefined behavior."
+    },
+    "sanitizerBuilds": {
+      "description": "Address, undefined behavior, and thread sanitizer builds for catching memory errors and data races.",
+      "sanitizers": {
+        "ASan": "AddressSanitizer — detects heap/stack buffer overflows, use-after-free, double-free, memory leaks. Essential for the parser which performs extensive string manipulation.",
+        "UBSan": "UndefinedBehaviorSanitizer — detects signed integer overflow, null pointer dereference, misaligned access, shift overflow. Important for numeric field parsing (port numbers, SSRC values, priorities).",
+        "TSan": "ThreadSanitizer — detects data races. iora_sdp itself is single-threaded, but TSan validates that the library is safe to use from multiple threads concurrently with separate SessionDescription instances."
+      },
+      "integration": "Sanitizer builds are configured as separate CMake build directories (build-asan, build-ubsan, build-tsan) with appropriate compiler flags. CI should run all tests under each sanitizer."
+    },
+    "crossCompilerTesting": {
+      "description": "The library is tested across multiple compilers to ensure portability and standards compliance.",
+      "compilers": [
+        "GCC (latest stable) — primary development compiler on Linux",
+        "Clang (latest stable) — used for sanitizer builds and fuzz testing",
+        "MSVC (latest Visual Studio) — Windows compatibility verification"
+      ],
+      "notes": "C++17 features used by iora_sdp (std::optional, std::string_view, std::variant, structured bindings, if-constexpr) have different implementation quality across compilers. Cross-compiler testing catches portability issues early."
+    }
+  },
+
+  "designDecisions": {
+    "description": "Key architectural decisions and their rationale",
+
+    "headerOnly": {
+      "decision": "Header-only library with no .cpp files and no shared library artifact",
+      "rationale": "SDP parsing/serialization is a lightweight, CPU-bound operation with no runtime state, no threads, and no I/O. Header-only distribution eliminates build complexity (no separate compilation, no linking, no ABI compatibility concerns) and allows the compiler to inline aggressively for performance. The entire library is included by adding a single include path.",
+      "tradeoff": "Compile time increases for applications that include iora_sdp headers in many translation units. Mitigated by the library's modest size (~2000 lines across all headers)."
+    },
+
+    "noExternalDependencies": {
+      "decision": "Pure C++17 standard library only — no external framework or library dependencies",
+      "rationale": "SDP parsing and serialization require only string manipulation, data structures, and basic numeric conversions — all of which are well-served by the C++17 standard library. Avoiding external dependencies eliminates version conflicts, reduces build complexity, and makes iora_sdp trivially embeddable in any C++17 project. Random number generation for ICE credentials and session IDs uses std::random_device + std::mt19937 from <random>.",
+      "tradeoff": "No built-in JSON serialization for SessionDescription — applications that need JSON interop must use their own JSON library (e.g., nlohmann/json) with the structured data model."
+    },
+
+    "noNegotiationStateMachine": {
+      "decision": "Provide stateless utility functions for offer/answer operations, NOT a negotiation state machine",
+      "rationale": "SDP negotiation is deeply intertwined with the signaling protocol (SIP, WebRTC JSEP, or proprietary). A generic state machine would either be too simple (missing protocol-specific rules) or too complex (encoding assumptions about the signaling layer). Real-world SBC and WebRTC applications need precise control over SDP manipulation. Utilities like matchCodecs() and addTransceiver() are composable building blocks that the application assembles into its own negotiation logic.",
+      "tradeoff": "Applications must implement their own offer/answer logic, which is more work but gives full control."
+    },
+
+    "standalone": {
+      "decision": "No dependency on iora_codecs or iora_rtp — iora_sdp is fully standalone",
+      "rationale": "SDP is a text format concern, not a media processing concern. Applications may need SDP parsing without any media stack (e.g., SDP logging, SDP analytics, SIP proxies that rewrite SDP). Keeping iora_sdp standalone also avoids circular dependencies: iora_codecs and iora_rtp can both depend on iora_sdp for SDP awareness without creating dependency cycles.",
+      "consumers": ["iora_codecs (maps rtpmap/fmtp to CodecInfo)", "iora_rtp (maps SDP media sections to RTP sessions)", "SIP proxy/SBC applications (SDP rewriting)", "WebRTC signaling servers (SDP parsing/generation)", "Analytics/logging tools (SDP inspection)"]
+    },
+
+    "typedAttributes": {
+      "decision": "Known SDP attributes are parsed into strongly-typed C++ structs, not generic string maps",
+      "rationale": "SDP attribute values have well-defined structure (e.g., a=candidate has ~10 fields). Typed structs provide compile-time safety, IDE autocompletion, and prevent the error-prone string manipulation that plagues generic SDP libraries. Applications work with RtpMapAttribute.clockRate (uint32_t) instead of parsing 'a=rtpmap:111 opus/48000/2' at every use site.",
+      "tradeoff": "Adding support for new attribute types requires defining a new struct and updating the parser dispatch. Mitigated by GenericAttribute as a catch-all."
+    },
+
+    "unknownAttributePreservation": {
+      "decision": "Unknown/unrecognized attributes are preserved as GenericAttribute for round-trip fidelity",
+      "rationale": "SDP is extensible — vendors add proprietary attributes (a=x-google-flag, a=x-ooma-*, etc.) and IETF drafts introduce new attributes before iora_sdp adds typed support. Discarding unknown attributes would break SDP when passed through a parse-modify-serialize pipeline. GenericAttribute stores the raw name and value, ensuring nothing is lost.",
+      "tradeoff": "Applications that need to inspect unknown attributes must work with raw strings for those specific attributes."
+    },
+
+    "stringViewParser": {
+      "decision": "Parser uses std::string_view for zero-copy line splitting during parsing, but data model stores std::string (owned copies)",
+      "rationale": "Zero-copy parsing minimizes allocations during the parsing hot path — string_view references into the original SDP text for intermediate results. However, the final data model stores std::string because the input SDP text may be a temporary buffer that is freed after parsing. This hybrid approach gives the best of both worlds: fast parsing and safe data model ownership.",
+      "tradeoff": "Slightly more memory usage than a fully zero-copy model that requires the input to outlive the data model. This is acceptable because SDP documents are small (typically 1-5 KB)."
+    },
+
+    "lenientByDefault": {
+      "decision": "Parser defaults to lenient (best-effort) mode; strict mode is opt-in",
+      "rationale": "Real-world SDP from browsers, SIP phones, and media gateways is frequently non-conformant. Chrome, Firefox, and Safari each have SDP quirks. SIP phones from different vendors produce SDP with varying levels of RFC compliance. A strict-by-default parser would reject valid-in-practice SDP that works fine with every other SDP library. Lenient mode skips malformed lines and accumulates warnings, allowing the application to process imperfect SDP while still being informed of issues.",
+      "tradeoff": "Lenient mode may mask genuine SDP errors. Applications that need validation (e.g., SDP validators, conformance testing) should use strict mode."
+    },
+
+    "webrtcFirstNotOnly": {
+      "decision": "WebRTC SDP patterns are first-class citizens, but plain SIP SDP is equally supported",
+      "rationale": "WebRTC is the dominant use case for modern SDP libraries, with complex attributes (BUNDLE, rtcp-mux, DTLS, ICE, msid, simulcast). The offer/answer utilities default to WebRTC conventions. However, SIP SDP (without BUNDLE, without DTLS, with SDES-SRTP crypto) is equally valid and fully supported by the parser, serializer, and data model. The library does not assume WebRTC and does not inject WebRTC-specific attributes unless explicitly requested via the utility functions."
+    },
+
+    "sessionIdGeneration": {
+      "decision": "Session ID generation in createOffer uses std::random_device + std::mt19937, not UUIDs",
+      "rationale": "SDP o= line sess-id is a numeric string (uint64). Using std::random_device + std::mt19937 from the C++17 standard library provides sufficient randomness without requiring an external UUID library. The generated value is a random 64-bit integer formatted as a decimal string, which is the standard practice for SDP session identifiers."
+    }
+  },
+
+  "companionLibraries": {
+    "iora_codecs": {
+      "description": "Audio and video codec library for media encoding, decoding, and DSP. Consumes iora_sdp to map rtpmap/fmtp attributes to CodecInfo for codec instantiation.",
+      "repository": "/workspace/iora_codecs",
+      "relationship": "iora_codecs may optionally depend on iora_sdp to provide SDP-to-CodecInfo mapping. iora_sdp does NOT depend on iora_codecs."
+    },
+    "iora_rtp": {
+      "description": "RTP framing, jitter buffering, DTMF, and comfort noise. Consumes iora_sdp to map SDP media sections to RTP session parameters (payload types, clock rates, SSRC, header extensions).",
+      "repository": "/workspace/iora_rtp",
+      "relationship": "iora_rtp may optionally depend on iora_sdp for SDP-to-RTP-session mapping. iora_sdp does NOT depend on iora_rtp."
+    },
+    "iora_webrtc": {
+      "description": "WebRTC integration library — PeerConnection, ICE agent, DTLS. Consumes iora_sdp as the primary SDP interface for offer/answer flows.",
+      "status": "future",
+      "relationship": "iora_webrtc will depend on iora_sdp for all SDP operations. iora_sdp does NOT depend on iora_webrtc."
+    }
+  },
+
+  "futureConsiderations": [
+    "SDP Plan B compatibility layer for legacy WebRTC applications (Chrome <72) — parsing support exists but utilities could provide Plan B to Unified Plan conversion",
+    "SDP diff/patch utilities — compute minimal changes between two SessionDescription objects for SDP update/re-INVITE optimization",
+    "JSON-SDP interop — toJson()/fromJson() for SessionDescription, enabling SDP-over-JSON transport for WebSocket-based signaling. Note: JSON serialization requires an external JSON library (e.g., nlohmann/json) since iora_sdp has no external dependencies. A separate optional header (sdp_json.hpp) could provide this integration, conditionally compiled when nlohmann/json is detected.",
+    "SDP validation mode — comprehensive RFC conformance checker beyond strict parsing, reporting all deviations from RFC 4566/8866",
+    "Codec preference reordering utility — reorder rtpmap entries in a media section to match application codec priority preferences",
+    "SRTP key fingerprint validation — verify that a=fingerprint hash matches a provided certificate (requires crypto library, may belong in iora_webrtc)",
+    "SDP bandwidth estimation — compute expected media bandwidth from rtpmap/fmtp/b= lines for capacity planning",
+    "Multi-party SDP utilities — helpers for constructing SDP for SFU (Selective Forwarding Unit) and MCU (Multipoint Control Unit) topologies",
+    "WHIP/WHEP SDP patterns — helpers for WebRTC-HTTP Ingestion/Egestion Protocol SDP construction",
+    "SDP template system — pre-built SessionDescription templates for common use cases (1:1 audio call, 1:1 video call, screen sharing, data channel)",
+    "a=rid and a=simulcast advanced utilities — helpers for constructing simulcast offers with resolution/framerate/bitrate constraints",
+    "Performance optimization — constexpr parsing for compile-time SDP processing of static SDP templates"
+  ]
+}

@@ -1,0 +1,141 @@
+# SDP fuzz dictionary — tokens for libFuzzer (-dict=) and AFL (-x)
+
+# RFC 4566 line types
+"v="
+"o="
+"s="
+"i="
+"u="
+"e="
+"p="
+"c="
+"b="
+"t="
+"r="
+"z="
+"k="
+"a="
+"m="
+
+# Line endings
+"\r\n"
+"\n"
+
+# Media types
+"audio"
+"video"
+"application"
+
+# Transport protocols
+"RTP/AVP"
+"RTP/SAVP"
+"RTP/SAVPF"
+"UDP/TLS/RTP/SAVPF"
+"UDP/DTLS/SCTP"
+"DTLS/SCTP"
+
+# Address types
+"IN"
+"IP4"
+"IP6"
+
+# Common attribute names
+"rtpmap"
+"fmtp"
+"ice-ufrag"
+"ice-pwd"
+"ice-options"
+"ice-lite"
+"fingerprint"
+"candidate"
+"ssrc"
+"ssrc-group"
+"msid"
+"mid"
+"setup"
+"rtcp-mux"
+"rtcp-rsize"
+"rtcp-mux-only"
+"rtcp-fb"
+"rtcp"
+"extmap"
+"extmap-allow-mixed"
+"group"
+"sendrecv"
+"sendonly"
+"recvonly"
+"inactive"
+"rid"
+"simulcast"
+"sctp-port"
+"max-message-size"
+"end-of-candidates"
+"ptime"
+"maxptime"
+"framerate"
+"crypto"
+"sctpmap"
+
+# Group semantics
+"BUNDLE"
+"LS"
+"FID"
+
+# Setup roles
+"actpass"
+"active"
+"passive"
+"holdconn"
+
+# Candidate keywords
+"host"
+"srflx"
+"prflx"
+"relay"
+"typ"
+"raddr"
+"rport"
+"tcptype"
+"udp"
+"tcp"
+
+# Codec names
+"opus"
+"VP8"
+"VP9"
+"H264"
+"PCMU"
+"PCMA"
+"G729"
+"telephone-event"
+"rtx"
+"red"
+"ulpfec"
+"webrtc-datachannel"
+
+# Fingerprint hash types
+"sha-256"
+"sha-1"
+"sha-512"
+
+# Bandwidth types
+"CT"
+"AS"
+"TIAS"
+
+# Feedback types
+"nack"
+"nack pli"
+"ccm fir"
+"goog-remb"
+"transport-cc"
+
+# Numeric patterns
+"0"
+"9"
+"48000"
+"90000"
+"8000"
+"127.0.0.1"
+"0.0.0.0"
+"::1"
