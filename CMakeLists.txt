@@ -11,7 +11,40 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # ==========================================================================
 add_library(iora_sdp INTERFACE)
 target_include_directories(iora_sdp INTERFACE
-  "${CMAKE_SOURCE_DIR}/include"
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+# ==========================================================================
+# Install rules
+# ==========================================================================
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(TARGETS iora_sdp EXPORT iora_sdpTargets)
+
+install(DIRECTORY include/iora DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(EXPORT iora_sdpTargets
+  NAMESPACE iora_sdp::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/iora_sdp
+)
+
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/iora_sdpConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/iora_sdpConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/iora_sdp
+)
+
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/iora_sdpConfigVersion.cmake"
+  COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/iora_sdpConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/iora_sdpConfigVersion.cmake"
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/iora_sdp
 )
 
 # ==========================================================================
