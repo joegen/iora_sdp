@@ -4,6 +4,9 @@
 /// @brief Stateless offer/answer utility functions for SDP operations.
 
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
+#include <optional>
 #include <random>
 #include <string>
 #include <utility>
@@ -235,15 +238,136 @@ struct OfferAnswer
     media.endOfCandidates = false;
   }
 
+  /// Parse an m= format token to a payload type (0-127), non-throwing.
+  /// Returns std::nullopt for non-numeric tokens (e.g. "webrtc-datachannel"),
+  /// out-of-range values, or over-long digit strings. Uses std::from_chars so
+  /// untrusted SDP can never throw std::out_of_range (unlike std::stoul).
+  static std::optional<std::uint8_t> formatToPayloadType(const std::string& s) noexcept
+  {
+    // std::from_chars on an empty range returns errc::invalid_argument, which the
+    // ec check below rejects — no separate empty guard needed.
+    unsigned value = 0;
+    const char* begin = s.data();
+    const char* end = begin + s.size();
+    auto res = std::from_chars(begin, end, value);
+    if (res.ec != std::errc() || res.ptr != end || value > 127)
+    {
+      return std::nullopt;
+    }
+    return static_cast<std::uint8_t>(value);
+  }
+
+  /// The implied a=rtpmap for a payload type that arrived WITHOUT one, for the
+  /// RFC 3551 static assignments iora negotiates. RFC 4566 section 6 makes
+  /// a=rtpmap optional for statically-assigned PTs; real endpoints (CUCM, older
+  /// Avaya/Polycom, carrier SBCs) omit it. Scope is bounded to the codecs
+  /// iora_media decodes — the authority for this set is the iora_media decoder
+  /// registry (payload_format_registry). G.729 (18) and CN (13) are deliberately
+  /// excluded (no G.729 decoder; CN is not a media codec, RFC 3389). channels is
+  /// left unset so a synthesized entry is byte-identical to a parsed bare
+  /// "PCMU/8000" (RFC 4566 section 6: an omitted channel count means one).
+  /// G.722 (9) uses the RFC 3551 section 4.5.2 8000 RTP clock despite 16 kHz
+  /// sampling. See tracker 2026-07-23-2 design decision D4.
+  /// Not noexcept: constructs a std::string encodingName (SSO-safe for these
+  /// literals, but the return type owns heap storage in general).
+  static std::optional<RtpMapAttribute> impliedStaticRtpMap(std::uint8_t pt)
+  {
+    switch (pt)
+    {
+      case 0: return RtpMapAttribute{0, "PCMU", 8000, std::nullopt};
+      case 8: return RtpMapAttribute{8, "PCMA", 8000, std::nullopt};
+      case 9: return RtpMapAttribute{9, "G722", 8000, std::nullopt};
+      default: return std::nullopt;
+    }
+  }
+
+  /// Return the media section's rtpMaps AUGMENTED with the implied rtpmap for
+  /// each rtpmap-less RFC 3551 static PT listed on the m= line (never a
+  /// formats-only projection that discards rtpMaps). Non-mutating: the caller's
+  /// MediaDescription is untouched. Two-pass union (tracker 2026-07-23-2 C-1):
+  ///  - PASS 1 walks media.formats IN ORDER so the m= fmt list drives preference
+  ///    order; a listed PT contributes its existing rtpMap entry if present, else
+  ///    a synthesized static entry, else (dynamic/unknown with no rtpmap) nothing.
+  ///  - PASS 2 appends every rtpMaps entry whose PT the fmt list did not cover
+  ///    (formats-less operands such as the createAnswer answerer or a
+  ///    reconstructed local offer, and orphan rtpmaps) so no entry is ever
+  ///    dropped and the legacy join-all-rtpMaps behavior is preserved.
+  /// Duplicate-PT rtpmaps in a malformed SDP are deduped by first occurrence.
+  static std::vector<RtpMapAttribute> normalizeStaticFormats(const MediaDescription& media)
+  {
+    std::vector<RtpMapAttribute> result;
+    result.reserve(media.rtpMaps.size() + media.formats.size());
+    std::vector<std::uint8_t> seen;
+
+    // The RFC 3551 static assignments 0/8/9 are AUDIO. Only synthesize for an
+    // audio m= line — a malformed video/application line listing 0/8/9 without
+    // an a=rtpmap must not gain a phantom PCMU/PCMA/G722 entry. Existing rtpMaps
+    // are still preserved for every media type (the union passes below).
+    const bool synthesizeStatics = (media.mediaType == MediaType::AUDIO);
+
+    auto isSeen = [&](std::uint8_t pt)
+    {
+      return std::find(seen.begin(), seen.end(), pt) != seen.end();
+    };
+    auto findRtpMap = [&](std::uint8_t pt) -> const RtpMapAttribute*
+    {
+      for (const auto& r : media.rtpMaps)
+      {
+        if (r.payloadType == pt)
+        {
+          return &r;
+        }
+      }
+      return nullptr;
+    };
+
+    for (const auto& token : media.formats)
+    {
+      auto pt = formatToPayloadType(token);
+      if (!pt.has_value() || isSeen(*pt))
+      {
+        continue;
+      }
+      if (const RtpMapAttribute* existing = findRtpMap(*pt))
+      {
+        result.push_back(*existing);
+        seen.push_back(*pt);
+      }
+      else if (synthesizeStatics)
+      {
+        if (auto implied = impliedStaticRtpMap(*pt))
+        {
+          result.push_back(*implied);
+          seen.push_back(*pt);
+        }
+      }
+    }
+
+    for (const auto& r : media.rtpMaps)
+    {
+      if (!isSeen(r.payloadType))
+      {
+        result.push_back(r);
+        seen.push_back(r.payloadType);
+      }
+    }
+    return result;
+  }
+
   /// Intersect codec lists between offer and answer media sections.
   /// Returns codecs present in both, ordered by the answerer's preference.
+  /// Both operands are first normalised (normalizeStaticFormats) so a
+  /// conformant rtpmap-less static offer still negotiates (RFC 4566 section 6).
   static std::vector<RtpMapAttribute> matchCodecs(const MediaDescription& offer,
                                                     const MediaDescription& answer)
   {
+    const std::vector<RtpMapAttribute> offerCodecs = normalizeStaticFormats(offer);
+    const std::vector<RtpMapAttribute> answerCodecs = normalizeStaticFormats(answer);
+
     std::vector<RtpMapAttribute> result;
-    for (const auto& answerCodec : answer.rtpMaps)
+    for (const auto& answerCodec : answerCodecs)
     {
-      for (const auto& offerCodec : offer.rtpMaps)
+      for (const auto& offerCodec : offerCodecs)
       {
         if (detail::iequals(answerCodec.encodingName, offerCodec.encodingName)
             && answerCodec.clockRate == offerCodec.clockRate)
@@ -266,25 +390,11 @@ struct OfferAnswer
           != retainPayloadTypes.end();
     };
 
-    auto isNumeric = [](const std::string& s)
-    {
-      return !s.empty()
-          && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
-    };
-
-    auto toPayloadType = [&](const std::string& s) -> std::optional<std::uint8_t>
-    {
-      if (!isNumeric(s))
-      {
-        return std::nullopt;
-      }
-      auto val = std::stoul(s);
-      if (val > 127)
-      {
-        return std::nullopt;
-      }
-      return static_cast<std::uint8_t>(val);
-    };
+    // Non-throwing parse (formatToPayloadType uses std::from_chars): an
+    // over-long all-digit fmt/rtcp-fb token from untrusted SDP can no longer
+    // throw std::out_of_range out of pruneUnusedCodecs (tracker 2026-07-23-2
+    // task 1.4).
+    auto toPayloadType = [](const std::string& s) { return formatToPayloadType(s); };
 
     media.rtpMaps.erase(
       std::remove_if(media.rtpMaps.begin(), media.rtpMaps.end(),
@@ -584,10 +694,11 @@ struct OfferAnswer
           answerMedia.fmtps = offerMedia.fmtps;
           answerMedia.rtcpFeedbacks = offerMedia.rtcpFeedbacks;
           answerMedia.extMaps = offerMedia.extMaps;
-          for (const auto& rtpMap : answerMedia.rtpMaps)
-          {
-            answerMedia.formats.push_back(std::to_string(rtpMap.payloadType));
-          }
+          // Mirror the offer's m= fmt list directly (RFC 3264 section 6.1).
+          // Building formats from rtpMaps would drop the offer's rtpmap-less
+          // static PTs and emit an m= line with no format tokens — invalid SDP
+          // per RFC 4566 section 5.14 (tracker 2026-07-23-2 task 1.3 / H-C).
+          answerMedia.formats = offerMedia.formats;
         }
       }
 

@@ -464,6 +464,354 @@ TEST_CASE("matchCodecs", "[offer_answer][codecs]")
 }
 
 // ---------------------------------------------------------------------------
+// T9b: static-PT normalisation (rtpmap-less RFC 3551 static payload types)
+//      tracker 2026-07-23-2 — matchCodecs must consult the m= fmt list.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("matchCodecs joins rtpmap-less static PTs (discriminator)",
+          "[offer_answer][codecs][static-pt]")
+{
+  // DISCRIMINATOR (tracker task 3.1): a conformant G.711 offer that lists its
+  // static PTs on the m= line WITHOUT any a=rtpmap must still negotiate. Fails
+  // TODAY because matchCodecs reads only rtpMaps and ignores formats.
+  MediaDescription offer;
+  offer.formats = {"0", "8"}; // m=audio ... RTP/AVP 0 8, no a=rtpmap lines
+  // offer.rtpMaps intentionally empty
+
+  MediaDescription answer;
+  answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+
+  auto result = OfferAnswer::matchCodecs(offer, answer);
+  REQUIRE(result.size() == 1);
+  REQUIRE(result[0].encodingName == "PCMU");
+  REQUIRE(result[0].payloadType == 0);
+}
+
+TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
+          "[offer_answer][codecs][static-pt]")
+{
+  SECTION("3.2 mixed styles: rtpmap-less offer PT 0 vs explicit a=rtpmap answer joins")
+  {
+    MediaDescription offer;
+    offer.formats = {"0"};
+    MediaDescription answer;
+    answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 1);
+    REQUIRE(result[0].encodingName == "PCMU");
+    REQUIRE(result[0].payloadType == 0);
+  }
+
+  SECTION("3.3 dynamic PT 96 with no rtpmap does NOT join")
+  {
+    MediaDescription offer;
+    offer.formats = {"96"}; // dynamic, no a=rtpmap — meaningless per RFC 4566 §6
+    MediaDescription answer;
+    answer.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
+
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.empty());
+  }
+
+  SECTION("3.4 CN (PT 13) with no rtpmap is NOT synthesized as an audio codec")
+  {
+    MediaDescription offer;
+    offer.formats = {"13"};
+    MediaDescription answer;
+    answer.rtpMaps.push_back({13, "CN", 8000, {}});
+
+    // The offer's bare CN is not synthesized, so nothing to join against.
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.empty());
+
+    auto norm = OfferAnswer::normalizeStaticFormats(offer);
+    REQUIRE(norm.empty());
+  }
+
+  SECTION("3.5 G.722 (PT 9) synthesizes with the RFC 3551 §4.5.2 8000 RTP clock")
+  {
+    MediaDescription offer;
+    offer.formats = {"9"};
+    auto norm = OfferAnswer::normalizeStaticFormats(offer);
+    REQUIRE(norm.size() == 1);
+    REQUIRE(norm[0].encodingName == "G722");
+    REQUIRE(norm[0].clockRate == 8000); // NOT 16000
+    REQUIRE_FALSE(norm[0].channels.has_value());
+  }
+
+  SECTION("3.6 NEGATIVE: G.729 (PT 18) rtpmap-less is NOT synthesized / does NOT join")
+  {
+    MediaDescription offer;
+    offer.formats = {"18"};
+    auto norm = OfferAnswer::normalizeStaticFormats(offer);
+    REQUIRE(norm.empty()); // iora decodes no G.729 — never advertise it (RFC 3264 §6.1)
+
+    MediaDescription answer;
+    answer.rtpMaps.push_back({18, "G729", 8000, {}});
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.empty());
+  }
+
+  SECTION("3.9 non-mutation: matchCodecs and normalizeStaticFormats leave the input unchanged")
+  {
+    MediaDescription offer;
+    offer.formats = {"0", "8"};
+    MediaDescription answer;
+    answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+
+    const MediaDescription offerBefore = offer;
+    const MediaDescription answerBefore = answer;
+    (void)OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(offer.formats == offerBefore.formats);
+    REQUIRE(offer.rtpMaps == offerBefore.rtpMaps);
+    REQUIRE(answer.formats == answerBefore.formats);
+    REQUIRE(answer.rtpMaps == answerBefore.rtpMaps);
+
+    // normalizeStaticFormats itself must not mutate its const& input.
+    (void)OfferAnswer::normalizeStaticFormats(offer);
+    REQUIRE(offer.formats == offerBefore.formats);
+    REQUIRE(offer.rtpMaps == offerBefore.rtpMaps);
+  }
+
+  SECTION("L-1 both operands rtpmap-less static -> both synthesize and join")
+  {
+    MediaDescription offer;
+    offer.formats = {"0", "8"};
+    MediaDescription answer;
+    answer.formats = {"0", "8"};
+
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 2);
+    bool hasPcmu = false, hasPcma = false;
+    for (const auto& c : result)
+    {
+      hasPcmu |= (c.encodingName == "PCMU");
+      hasPcma |= (c.encodingName == "PCMA");
+    }
+    REQUIRE(hasPcmu);
+    REQUIRE(hasPcma);
+  }
+
+  SECTION("L-4 non-audio media does NOT synthesize static audio PTs")
+  {
+    MediaDescription video;
+    video.mediaType = MediaType::VIDEO;
+    video.formats = {"0", "8", "9"}; // malformed: audio static PTs on a video m= line
+    auto norm = OfferAnswer::normalizeStaticFormats(video);
+    REQUIRE(norm.empty()); // no phantom PCMU/PCMA/G722 for a video section
+  }
+
+  SECTION("3.10 dedup: PT listed in formats AND present in rtpMaps yields one entry")
+  {
+    MediaDescription offer;
+    offer.formats = {"0"};
+    offer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+
+    auto norm = OfferAnswer::normalizeStaticFormats(offer);
+    REQUIRE(norm.size() == 1);
+    REQUIRE(norm[0].payloadType == 0);
+    REQUIRE(norm[0].encodingName == "PCMU");
+  }
+
+  SECTION("3.11 preference order: fmt-list order drives the answerer result order")
+  {
+    // Answer (the outer/preference operand) offers PCMU(0, static-no-rtpmap)
+    // first, opus(96, rtpmap) second on its m= line.
+    MediaDescription answer;
+    answer.formats = {"0", "96"};
+    answer.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
+
+    MediaDescription offer; // a peer that supports both
+    offer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+    offer.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 2);
+    REQUIRE(result[0].encodingName == "PCMU"); // fmt-list preferred, not opus
+    REQUIRE(result[1].encodingName == "opus");
+  }
+
+  SECTION("3.12 static + dynamic mix: both negotiate")
+  {
+    MediaDescription offer;
+    offer.formats = {"0", "96"}; // PT 0 static-no-rtpmap, PT 96 dynamic-with-rtpmap
+    offer.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
+
+    MediaDescription answer;
+    answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+    answer.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
+
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 2);
+    bool hasPcmu = false, hasOpus = false;
+    for (const auto& c : result)
+    {
+      hasPcmu |= (c.encodingName == "PCMU");
+      hasOpus |= (c.encodingName == "opus");
+    }
+    REQUIRE(hasPcmu);
+    REQUIRE(hasOpus);
+  }
+
+  SECTION("3.13 untrusted input: non-numeric / over-long / out-of-range tokens ignored, no throw")
+  {
+    MediaDescription offer;
+    offer.formats = {"webrtc-datachannel", "99999999999999999999", "200", "0"};
+    std::vector<RtpMapAttribute> norm;
+    REQUIRE_NOTHROW(norm = OfferAnswer::normalizeStaticFormats(offer));
+    // Only the valid static PT 0 survives.
+    REQUIRE(norm.size() == 1);
+    REQUIRE(norm[0].payloadType == 0);
+    REQUIRE(norm[0].encodingName == "PCMU");
+  }
+
+  SECTION("3.15 CUCM/DTMF: rtpmap-less static audio + explicit telephone-event")
+  {
+    MediaDescription offer;
+    offer.formats = {"0", "101"}; // PCMU (no rtpmap) + telephone-event (rtpmap)
+    offer.rtpMaps.push_back({101, "telephone-event", 8000, {}});
+
+    MediaDescription answer;
+    answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+    answer.rtpMaps.push_back({101, "telephone-event", 8000, {}});
+
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 2);
+    bool hasPcmu = false, hasTev = false;
+    for (const auto& c : result)
+    {
+      hasPcmu |= (c.encodingName == "PCMU");
+      hasTev |= detail::iequals(c.encodingName, "telephone-event");
+    }
+    REQUIRE(hasPcmu);
+    REQUIRE(hasTev);
+  }
+
+  SECTION("3.18 C-1 guard: rtpMaps populated + formats empty returns the full rtpMaps set")
+  {
+    // Models the createAnswer answerer operand (rtpMaps = supportedCodecs, no
+    // formats) and iora_media's synthLocalOffer. PASS 2 must recover every entry.
+    MediaDescription media;
+    media.rtpMaps.push_back({0, "PCMU", 8000, {}});
+    media.rtpMaps.push_back({8, "PCMA", 8000, {}});
+    media.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    REQUIRE(media.formats.empty());
+
+    auto norm = OfferAnswer::normalizeStaticFormats(media);
+    REQUIRE(norm.size() == 3);
+    REQUIRE(norm[0].payloadType == 0);
+    REQUIRE(norm[1].payloadType == 8);
+    REQUIRE(norm[2].payloadType == 111);
+  }
+}
+
+TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answer",
+          "[offer_answer][codecs][static-pt]")
+{
+  auto makeStaticOffer = [](std::vector<std::string> fmts)
+  {
+    SessionDescription offer;
+    MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.port = 5004;
+    m.protocol = TransportProtocol::RTP_AVP;
+    m.direction = Direction::SENDRECV;
+    m.formats = std::move(fmts);
+    offer.mediaDescriptions.push_back(std::move(m));
+    return offer;
+  };
+
+  SECTION("3.7 supportedCodecs branch: answers a real port + explicit rtpmap, not port 0/INACTIVE")
+  {
+    SessionDescription offer = makeStaticOffer({"0", "8"});
+    AnswerOptions opts;
+    opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+
+    SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.port != 0);
+    REQUIRE(am.direction != Direction::INACTIVE);
+    REQUIRE(am.rtpMaps.size() == 1);
+    REQUIRE(am.rtpMaps[0].encodingName == "PCMU"); // explicit a=rtpmap in the answer
+    REQUIRE(am.rtpMaps[0].payloadType == 0);
+    bool hasFmt0 = std::find(am.formats.begin(), am.formats.end(), "0") != am.formats.end();
+    REQUIRE(hasFmt0);
+  }
+
+  SECTION("3.8 no-supportedCodecs mirror: answer echoes the offer's non-empty fmt list")
+  {
+    SessionDescription offer = makeStaticOffer({"0", "8"});
+    SessionDescription answer = OfferAnswer::createAnswer(offer); // no supportedCodecs
+
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE_FALSE(am.formats.empty()); // NOT an invalid empty-format m= line
+    REQUIRE(am.formats == offer.mediaDescriptions[0].formats);
+  }
+
+  SECTION("3.8b no-supportedCodecs mirror, NORMAL offer: precise formats + rtpMaps contract")
+  {
+    SessionDescription offer;
+    MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.port = 5004;
+    m.protocol = TransportProtocol::RTP_AVP;
+    m.direction = Direction::SENDRECV;
+    m.formats = {"0", "96"};
+    m.rtpMaps.push_back({0, "PCMU", 8000, {}});
+    m.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
+    offer.mediaDescriptions.push_back(m);
+
+    SessionDescription answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.formats == offer.mediaDescriptions[0].formats); // fmt-list order
+    REQUIRE(am.rtpMaps == offer.mediaDescriptions[0].rtpMaps);
+  }
+
+  SECTION("3.9 non-mutation: createAnswer supportedCodecs path leaves the offer unchanged")
+  {
+    SessionDescription offer = makeStaticOffer({"0", "8"});
+    const SessionDescription offerBefore = offer;
+    AnswerOptions opts;
+    opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+    (void)OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(offer == offerBefore); // SessionDescription operator== deep-compares
+  }
+}
+
+TEST_CASE("matchCodecs joins rtpmap-less static PTs parsed from SDP TEXT",
+          "[offer_answer][codecs][static-pt]")
+{
+  // 3.14 end-to-end: exercises parseMediaLine -> formats -> normalizeStaticFormats,
+  // which the direct-construct tests cannot catch (a wiring regression would be
+  // invisible to them).
+  const std::string sdp =
+      "v=0\r\n"
+      "o=- 1 1 IN IP4 127.0.0.1\r\n"
+      "s=-\r\n"
+      "c=IN IP4 127.0.0.1\r\n"
+      "t=0 0\r\n"
+      "m=audio 5004 RTP/AVP 0 8\r\n"; // static PTs, NO a=rtpmap
+
+  auto parsed = SdpParser::parse(sdp);
+  REQUIRE(parsed.hasValue());
+  REQUIRE(parsed.value->mediaDescriptions.size() == 1);
+  const MediaDescription& offer = parsed.value->mediaDescriptions[0];
+  REQUIRE(offer.rtpMaps.empty());       // no a=rtpmap parsed
+  REQUIRE(offer.formats == std::vector<std::string>{"0", "8"});
+
+  MediaDescription answer;
+  answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
+
+  auto result = OfferAnswer::matchCodecs(offer, answer);
+  REQUIRE(result.size() == 1);
+  REQUIRE(result[0].encodingName == "PCMU");
+}
+
+// ---------------------------------------------------------------------------
 // T9: pruneUnusedCodecs
 // ---------------------------------------------------------------------------
 
