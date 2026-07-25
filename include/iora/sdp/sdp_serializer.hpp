@@ -69,7 +69,17 @@ inline std::string serializeConnection(const ConnectionData& c, const std::strin
 {
   std::string result = "c=" + std::string(toString(c.netType)) + " "
       + std::string(toString(c.addrType)) + " " + c.address;
-  if (c.ttl.has_value())
+  // RFC 4566 §5.7: IPv4 multicast is <base>/<ttl>[/<count>]; IPv6 multicast is
+  // <base>[/<count>] and MUST NOT carry a TTL. The count therefore cannot be
+  // nested inside the TTL — for IPv6 it is the only slash group there is.
+  if (c.addrType == AddressType::IP6)
+  {
+    if (c.numberOfAddresses.has_value())
+    {
+      result += "/" + std::to_string(*c.numberOfAddresses);
+    }
+  }
+  else if (c.ttl.has_value())
   {
     result += "/" + std::to_string(*c.ttl);
     if (c.numberOfAddresses.has_value())

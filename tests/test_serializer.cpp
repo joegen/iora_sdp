@@ -1631,21 +1631,31 @@ TEST_CASE("Serializer: Round-trip connection with TTL and numberOfAddresses", "[
   SessionDescription session;
   session.sessionName = "-";
   session.origin = {"-", "0", "0", NetworkType::IN, AddressType::IP4, "0.0.0.0"};
+  // Multi-address multicast is MEDIA-level only (RFC 4566 §5.7 MUST NOT at
+  // session level).
   ConnectionData conn;
   conn.address = "224.2.36.42";
   conn.ttl = 127;
   conn.numberOfAddresses = 3;
-  session.connection = conn;
+  MediaDescription audio;
+  audio.mediaType = MediaType::AUDIO;
+  audio.port = 49170;
+  audio.protocol = TransportProtocol::RTP_AVP;
+  audio.formats = {"0"};
+  audio.connection = conn;
+  session.mediaDescriptions.push_back(audio);
   TimeDescription td;
   session.timeDescriptions.push_back(td);
 
   auto sdp = SdpSerializer::serialize(session);
   auto result = SdpParser::parse(sdp);
   REQUIRE(result.hasValue());
-  CHECK(result.value->connection.has_value());
-  CHECK(result.value->connection->address == "224.2.36.42");
-  CHECK(result.value->connection->ttl == 127);
-  CHECK(result.value->connection->numberOfAddresses == 3);
+  REQUIRE(!result.value->mediaDescriptions.empty());
+  auto& parsedConn = result.value->mediaDescriptions[0].connection;
+  CHECK(parsedConn.has_value());
+  CHECK(parsedConn->address == "224.2.36.42");
+  CHECK(parsedConn->ttl == 127);
+  CHECK(parsedConn->numberOfAddresses == 3);
 }
 
 TEST_CASE("Serializer: Round-trip TimeDescription with RepeatTime", "[serializer][roundtrip]")
@@ -1949,4 +1959,67 @@ TEST_CASE("Serializer: RepeatTime with empty offsets", "[serializer][edge]")
   session.timeDescriptions.push_back(td);
   auto sdp = SdpSerializer::serialize(session);
   CHECK(sdp.find("r=3600 1800\r\n") != std::string::npos);
+}
+
+// ============================================================================
+// c= multicast slash notation (RFC 4566 §5.7)
+// ============================================================================
+
+TEST_CASE("Serializer: IPv6 multicast emits the address count without a TTL",
+          "[serializer][connection]")
+{
+  // §5.7: "the TTL value MUST NOT be present for IPv6 multicast", so for IPv6
+  // the count is the ONLY slash group — it cannot be nested inside a TTL.
+  SessionDescription session;
+  ConnectionData c;
+  c.netType = NetworkType::IN;
+  c.addrType = AddressType::IP6;
+  c.address = "FF15::101";
+  c.numberOfAddresses = 3;
+  MediaDescription m;
+  m.connection = c;
+  session.mediaDescriptions.push_back(m);
+
+  auto sdp = SdpSerializer::serialize(session);
+  CHECK(sdp.find("c=IN IP6 FF15::101/3\r\n") != std::string::npos);
+}
+
+TEST_CASE("Serializer: an IPv6 c= never emits a TTL group",
+          "[serializer][connection]")
+{
+  // RFC 4566 §5.7 forbids a TTL for IPv6 multicast. The model can hold the
+  // combination; the wire form must not carry it. These pin the two silent
+  // drops the addrType branch introduced.
+  SECTION("a TTL alone is dropped")
+  {
+    SessionDescription session;
+    ConnectionData c;
+    c.netType = NetworkType::IN;
+    c.addrType = AddressType::IP6;
+    c.address = "FF15::101";
+    c.ttl = 16;
+    session.connection = c;   // no count here, so session level is legal
+
+    auto sdp = SdpSerializer::serialize(session);
+    CHECK(sdp.find("c=IN IP6 FF15::101\r\n") != std::string::npos);
+    CHECK(sdp.find("/16") == std::string::npos);
+  }
+
+  SECTION("a TTL is dropped but the address count survives")
+  {
+    SessionDescription session;
+    ConnectionData c;
+    c.netType = NetworkType::IN;
+    c.addrType = AddressType::IP6;
+    c.address = "FF15::101";
+    c.ttl = 16;
+    c.numberOfAddresses = 3;
+    MediaDescription m;
+    m.connection = c;
+    session.mediaDescriptions.push_back(m);
+
+    auto sdp = SdpSerializer::serialize(session);
+    CHECK(sdp.find("c=IN IP6 FF15::101/3\r\n") != std::string::npos);
+    CHECK(sdp.find("/16") == std::string::npos);
+  }
 }

@@ -500,6 +500,10 @@ struct OfferAnswer
   }
 
   /// Scaffold a new SessionDescription for a WebRTC or SIP offer.
+  ///
+  /// The connection address is the caller's to supply: no c= is set at either
+  /// level, so the result is incomplete per RFC 4566 §5.7 until the caller
+  /// assigns one (see SessionDescription::effectiveConnection).
   static SessionDescription createOffer(const OfferOptions& options = {})
   {
     SessionDescription session;
@@ -588,6 +592,9 @@ struct OfferAnswer
   }
 
   /// Generate an SDP answer from a received offer.
+  ///
+  /// As with createOffer, no c= is set at either level — the caller supplies
+  /// the answer's connection address (RFC 4566 §5.7).
   static SessionDescription createAnswer(const SessionDescription& offer,
                                           const AnswerOptions& answerOptions = {})
   {

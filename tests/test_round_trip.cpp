@@ -1037,3 +1037,31 @@ TEST_CASE("Round-trip: very long attribute line", "[round_trip]")
   REQUIRE(r2.hasValue());
   REQUIRE(*r1.value == *r2.value);
 }
+
+TEST_CASE("Round-trip: IPv6 multicast address count", "[round_trip]")
+{
+  // The parser and the serializer each encode the RFC 4566 §5.7 rule that the
+  // slash notation is address-family dependent. Testing them separately cannot
+  // catch the two drifting apart; only the pair can.
+  // MEDIA-level: RFC 4566 §5.7 forbids multiple addresses at session level.
+  const std::string sdp =
+    "v=0\r\n"
+    "o=- 0 0 IN IP6 ::1\r\n"
+    "s=-\r\n"
+    "t=0 0\r\n"
+    "m=audio 49170 RTP/AVP 0\r\n"
+    "c=IN IP6 FF15::101/3\r\n";
+
+  roundTrip(sdp); // whole-model idempotence
+
+  auto parsed = SdpParser::parse(sdp);
+  REQUIRE(parsed.hasValue());
+  REQUIRE(!parsed.value->mediaDescriptions.empty());
+  REQUIRE(parsed.value->mediaDescriptions[0].connection.has_value());
+  REQUIRE(!parsed.value->mediaDescriptions[0].connection->ttl.has_value());
+  REQUIRE(parsed.value->mediaDescriptions[0].connection->numberOfAddresses.has_value());
+  REQUIRE(*parsed.value->mediaDescriptions[0].connection->numberOfAddresses == 3);
+
+  const auto reserialized = SdpSerializer::serialize(*parsed.value);
+  CHECK(reserialized.find("c=IN IP6 FF15::101/3\r\n") != std::string::npos);
+}

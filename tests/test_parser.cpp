@@ -1072,20 +1072,77 @@ TEST_CASE("Parser: SIP SDP (RTP/AVP with SDES crypto, no ICE)", "[parser][sip]")
 
 TEST_CASE("Parser: multicast SDP with c= line TTL and numberOfAddresses", "[parser][multicast]")
 {
+  // The multi-address form is MEDIA-level: RFC 4566 §5.7 permits multiple
+  // addresses only per-media, and "They MUST NOT be specified for a
+  // session-level 'c=' field."
   std::string sdp =
     "v=0\r\n"
     "o=- 0 0 IN IP4 0.0.0.0\r\n"
     "s=-\r\n"
-    "c=IN IP4 224.2.36.42/127/3\r\n"
-    "t=0 0\r\n";
+    "t=0 0\r\n"
+    "m=audio 49170 RTP/AVP 0\r\n"
+    "c=IN IP4 224.2.36.42/127/3\r\n";
 
   auto result = SdpParser::parse(sdp);
   REQUIRE(result.hasValue());
-  auto& c = result.value->connection;
+  REQUIRE(!result.value->mediaDescriptions.empty());
+  auto& c = result.value->mediaDescriptions[0].connection;
   REQUIRE(c.has_value());
   REQUIRE(c->address == "224.2.36.42");
   REQUIRE(c->ttl == 127);
   REQUIRE(c->numberOfAddresses == 3);
+}
+
+TEST_CASE("Parser: a session-level c= may carry a TTL but not an address count",
+          "[parser][multicast][connection]")
+{
+  // RFC 4566 §5.7: "Multiple addresses or 'c=' lines MAY be specified on a
+  // per-media basis only if they provide multicast addresses for different
+  // layers ... They MUST NOT be specified for a session-level 'c=' field."
+  // A <count> group IS multiple addresses; a bare <base>/<ttl> is not (RFC 4566
+  // §5's own example is c=IN IP4 224.2.17.12/127).
+  SECTION("session-level <base>/<ttl> is legal and preserved")
+  {
+    auto result = SdpParser::parse(
+      "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 224.2.17.12/127\r\nt=0 0\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->connection.has_value());
+    REQUIRE(result.value->connection->ttl == 127);
+    REQUIRE(!result.value->connection->numberOfAddresses.has_value());
+  }
+
+  SECTION("session-level address count is dropped with a warning in lenient mode")
+  {
+    auto result = SdpParser::parse(
+      "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 224.2.36.42/127/3\r\nt=0 0\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->connection.has_value());
+    REQUIRE(result.value->connection->ttl == 127);
+    REQUIRE(!result.value->connection->numberOfAddresses.has_value());
+    REQUIRE_THAT(result.warnings.back().message,
+                 Catch::Matchers::Contains("multiple addresses"));
+  }
+
+  SECTION("session-level address count is a strict-mode error")
+  {
+    SdpParserOptions opts;
+    opts.strict = true;
+    auto result = SdpParser::parse(
+      "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nc=IN IP4 224.2.36.42/127/3\r\nt=0 0\r\n",
+      opts);
+    REQUIRE(!result.hasValue());
+    REQUIRE(result.hasError());
+  }
+
+  SECTION("any IPv6 session-level slash group is a count, so it is forbidden")
+  {
+    SdpParserOptions opts;
+    opts.strict = true;
+    auto result = SdpParser::parse(
+      "v=0\r\no=- 0 0 IN IP6 ::1\r\ns=-\r\nc=IN IP6 FF15::101/3\r\nt=0 0\r\n", opts);
+    REQUIRE(!result.hasValue());
+    REQUIRE(result.hasError());
+  }
 }
 
 // =========================================================================
@@ -2105,4 +2162,591 @@ TEST_CASE("Parser: media-level i= line generates warning", "[parser][edge]")
   auto result = SdpParser::parse(sdp);
   REQUIRE(result.hasValue());
   REQUIRE(!result.warnings.empty());
+}
+
+// =========================================================================
+// c= line hardening + RFC 4566 §5.7 fold-down over parsed SDP
+// =========================================================================
+
+namespace {
+
+/// A session-level c= plus one audio section, with extra media-level lines
+/// spliced in.
+std::string sdpWithMediaLines(const std::string& sessionConnection,
+                              const std::string& mediaLines)
+{
+  return "v=0\r\n"
+         "o=- 1 1 IN IP4 198.51.100.9\r\n"
+         "s=-\r\n"
+       + sessionConnection
+       + "t=0 0\r\n"
+         "m=audio 49170 RTP/AVP 0 8 101\r\n"
+       + mediaLines;
+}
+
+} // namespace
+
+TEST_CASE("Parser: a malformed media c= does not shadow the session c=",
+          "[parser][connection]")
+{
+  // A c= that cannot be parsed must leave the media-level value UNSET so the
+  // session-level address folds down. Yielding a default-constructed
+  // ConnectionData would present an engaged-but-empty override and destroy the
+  // only usable address in the description.
+  const std::string sdp =
+    sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n", "c=IN IP4\r\n");
+
+  auto result = SdpParser::parse(sdp);
+  REQUIRE(result.hasValue());
+  REQUIRE(!result.value->mediaDescriptions.empty());
+  REQUIRE(!result.value->mediaDescriptions[0].connection.has_value());
+  REQUIRE(!result.warnings.empty());
+
+  const auto resolved = result.value->effectiveConnection(0);
+  REQUIRE(resolved.has_value());
+  REQUIRE(resolved->address == "198.51.100.9");
+}
+
+TEST_CASE("Parser: a malformed c= is an error in strict mode",
+          "[parser][connection][strict]")
+{
+  const std::string sdp =
+    sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n", "c=IN IP4\r\n");
+
+  SdpParserOptions opts;
+  opts.strict = true;
+  auto result = SdpParser::parse(sdp, opts);
+  REQUIRE(!result.hasValue());
+  REQUIRE(result.hasError());
+}
+
+TEST_CASE("Parser: a c= with a surplus token is rejected", "[parser][connection]")
+{
+  // §5.7 defines exactly three subfields.
+  const std::string sdp =
+    sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n",
+                      "c=IN IP4 203.0.113.7 surplus\r\n");
+
+  auto result = SdpParser::parse(sdp);
+  REQUIRE(result.hasValue());
+  REQUIRE(!result.value->mediaDescriptions[0].connection.has_value());
+  REQUIRE_THAT(result.warnings.back().message,
+               Catch::Matchers::Contains("Malformed c="));
+
+  const auto resolved = result.value->effectiveConnection(0);
+  REQUIRE(resolved.has_value());
+  REQUIRE(resolved->address == "198.51.100.9");
+}
+
+TEST_CASE("Parser: IPv6 multicast /N is an address count, not a TTL",
+          "[parser][connection]")
+{
+  // RFC 4566 §5.7: "the TTL value MUST NOT be present for IPv6 multicast";
+  // c=IN IP6 FF15::101/3 denotes THREE addresses.
+  const std::string sdp =
+    sdpWithMediaLines("", "c=IN IP6 FF15::101/3\r\n");
+
+  auto result = SdpParser::parse(sdp);
+  REQUIRE(result.hasValue());
+
+  const auto resolved = result.value->effectiveConnection(0);
+  REQUIRE(resolved.has_value());
+  REQUIRE(resolved->address == "FF15::101");
+  REQUIRE(resolved->addrType == AddressType::IP6);
+  REQUIRE(!resolved->ttl.has_value());
+  REQUIRE(resolved->numberOfAddresses.has_value());
+  REQUIRE(*resolved->numberOfAddresses == 3);
+}
+
+TEST_CASE("Parser: IPv4 multicast keeps ttl and count", "[parser][connection]")
+{
+  const std::string sdp = sdpWithMediaLines("", "c=IN IP4 224.2.1.1/127/3\r\n");
+
+  auto result = SdpParser::parse(sdp);
+  REQUIRE(result.hasValue());
+
+  const auto resolved = result.value->effectiveConnection(0);
+  REQUIRE(resolved.has_value());
+  REQUIRE(resolved->address == "224.2.1.1");
+  REQUIRE(resolved->ttl.has_value());
+  REQUIRE(*resolved->ttl == 127);
+  REQUIRE(resolved->numberOfAddresses.has_value());
+  REQUIRE(*resolved->numberOfAddresses == 3);
+}
+
+TEST_CASE("Parser: an IPv6 c= carrying a TTL group is rejected",
+          "[parser][connection]")
+{
+  // Not merely a semantic MUST NOT: the §5.7 grammar admits only one slash
+  // group for IPv6 (IP6-multicast = hexpart [ "/" integer ]), and the two
+  // groups are not disambiguable, so guessing would invent a layer count.
+  const std::string sdp = sdpWithMediaLines("", "c=IN IP6 FF15::101/16/3\r\n");
+
+  auto result = SdpParser::parse(sdp);
+  REQUIRE(result.hasValue());
+  REQUIRE(!result.value->mediaDescriptions[0].connection.has_value());
+  REQUIRE(!result.warnings.empty());
+}
+
+TEST_CASE("Parser: a repeated c= is reported, not silently discarded",
+          "[parser][connection]")
+{
+  // §5.7 permits repeated media-level c= lines ONLY for multicast layers, so a
+  // fixture for that permission must actually be multicast — 224.0.0.0/4 here.
+  // A unicast pair would assert strict-mode acceptance of an input §5.7 does not
+  // permit, while claiming to protect one it does.
+  const std::string layeredMulticast = sdpWithMediaLines(
+    "", "c=IN IP4 224.2.1.1/127\r\nc=IN IP4 224.2.1.2/127\r\n");
+
+  SECTION("media level keeps the FIRST line — the layered-multicast base")
+  {
+    // §5.7's slash form is <base multicast address>[/<ttl>]/<count>, and its
+    // stated multi-line equivalent lists the base first. An enhancement layer
+    // alone is undecodable, so the base is the one to keep. (The RFC states no
+    // ordering for separate c= lines; keeping the first follows the slash form.)
+    auto result = SdpParser::parse(layeredMulticast);
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->mediaDescriptions[0].connection.has_value());
+    REQUIRE(result.value->mediaDescriptions[0].connection.has_value());
+    REQUIRE(result.value->mediaDescriptions[0].connection->address == "224.2.1.1");
+    REQUIRE_THAT(result.warnings.back().message,
+                 Catch::Matchers::Contains("layered multicast"));
+  }
+
+  SECTION("media level is legal SDP, so strict mode must NOT reject it")
+  {
+    // Rejecting here would declare a conformant layered-multicast description
+    // malformed (§5.7: multiple per-media c= lines MAY be specified).
+    SdpParserOptions opts;
+    opts.strict = true;
+    auto result = SdpParser::parse(layeredMulticast, opts);
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.hasError());
+    REQUIRE(result.value->mediaDescriptions[0].connection.has_value());
+    REQUIRE(result.value->mediaDescriptions[0].connection->address == "224.2.1.1");
+  }
+
+  SECTION("a repeated UNICAST media c= is also accepted — a known limitation")
+  {
+    // §5.7's permission is conditional on multicast, but the parser treats the
+    // address as an opaque string (FQDNs are legal), so it cannot classify the
+    // base address and does not enforce the condition. Pinned so the limitation
+    // is deliberate and visible rather than assumed.
+    const std::string unicastPair =
+      sdpWithMediaLines("", "c=IN IP4 203.0.113.7\r\nc=IN IP4 203.0.113.8\r\n");
+
+    SdpParserOptions opts;
+    opts.strict = true;
+    auto result = SdpParser::parse(unicastPair, opts);
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->mediaDescriptions[0].connection->address == "203.0.113.7");
+  }
+
+  SECTION("session level is forbidden outright by §5.7")
+  {
+    const std::string sdp =
+      "v=0\r\n"
+      "o=- 1 1 IN IP4 198.51.100.9\r\n"
+      "s=-\r\n"
+      "c=IN IP4 198.51.100.9\r\n"
+      "c=IN IP4 203.0.113.7\r\n"
+      "t=0 0\r\n"
+      "m=audio 49170 RTP/AVP 0\r\n";
+
+    SECTION("strict mode errors")
+    {
+      SdpParserOptions opts;
+      opts.strict = true;
+      auto result = SdpParser::parse(sdp, opts);
+      REQUIRE(!result.hasValue());
+      REQUIRE(result.hasError());
+    }
+
+    SECTION("lenient mode warns and keeps the first")
+    {
+      auto result = SdpParser::parse(sdp);
+      REQUIRE(result.hasValue());
+      REQUIRE(result.value->connection.has_value());
+      REQUIRE(result.value->connection->address == "198.51.100.9");
+      REQUIRE_THAT(result.warnings.back().message,
+                   Catch::Matchers::Contains("Duplicate session-level"));
+    }
+  }
+
+  SECTION("a valid c= followed by a malformed one is reported as MALFORMED")
+  {
+    // The duplicate check runs after the parse, so the diagnostic names the
+    // real defect rather than claiming an overwrite that never happened.
+    const std::string sdp =
+      sdpWithMediaLines("", "c=IN IP4 203.0.113.7\r\nc=IN IP4\r\n");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->mediaDescriptions[0].connection.has_value());
+    REQUIRE(result.value->mediaDescriptions[0].connection->address == "203.0.113.7");
+    REQUIRE_THAT(result.warnings.back().message,
+                 Catch::Matchers::Contains("Malformed c="));
+  }
+
+  SECTION("the same ordering holds at the SESSION site")
+  {
+    // The session site carries its own copy of the parse-before-repeat order.
+    const std::string sdp =
+      "v=0\r\n"
+      "o=- 1 1 IN IP4 198.51.100.9\r\n"
+      "s=-\r\n"
+      "c=IN IP4 198.51.100.9\r\n"
+      "c=IN IP4\r\n"
+      "t=0 0\r\n"
+      "m=audio 49170 RTP/AVP 0\r\n";
+
+    auto lenient = SdpParser::parse(sdp);
+    REQUIRE(lenient.hasValue());
+    REQUIRE(lenient.value->connection.has_value());
+    REQUIRE(lenient.value->connection->address == "198.51.100.9");
+    REQUIRE_THAT(lenient.warnings.back().message,
+                 Catch::Matchers::Contains("Malformed c="));
+
+    SdpParserOptions opts;
+    opts.strict = true;
+    auto strict = SdpParser::parse(sdp, opts);
+    REQUIRE(!strict.hasValue());
+    REQUIRE(strict.hasError());
+    REQUIRE(strict.error->message == "Malformed c= line");
+  }
+
+  SECTION("a malformed c= followed by a valid one keeps the first USABLE value")
+  {
+    const std::string sdp =
+      sdpWithMediaLines("", "c=IN IP4\r\nc=IN IP4 203.0.113.8\r\n");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->mediaDescriptions[0].connection.has_value());
+    REQUIRE(result.value->mediaDescriptions[0].connection->address == "203.0.113.8");
+  }
+}
+
+TEST_CASE("Parser: a=rtcp stores no address without a recognised family",
+          "[parser][rtcp]")
+{
+  // RFC 3605 §2.1 — the address is meaningful only with its nettype/addrtype.
+  // A half-populated attribute names an RTCP destination the serializer then
+  // drops silently.
+  SECTION("unknown addrtype leaves the whole address unset")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:53020 IN IP9 198.51.100.9\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->rtcp.has_value());
+    REQUIRE(result.value->rtcp->port == 53020);
+    REQUIRE(!result.value->rtcp->address.has_value());
+    REQUIRE(!result.value->rtcp->addrType.has_value());
+  }
+
+  SECTION("unknown nettype leaves the whole address unset")
+  {
+    // The other half of the `nt && at` guard — without this, dropping the
+    // nettype check would leave the suite green.
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:53020 XX IP4 198.51.100.9\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->rtcp.has_value());
+    REQUIRE(!result.value->rtcp->address.has_value());
+    REQUIRE(!result.value->rtcp->netType.has_value());
+  }
+
+  SECTION("a truncated address group leaves the address unset")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:53020 IN IP4\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->rtcp.has_value());
+    REQUIRE(result.value->rtcp->port == 53020);
+    REQUIRE(!result.value->rtcp->address.has_value());
+  }
+
+  SECTION("a well-formed a=rtcp keeps address and family together")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:53020 IN IP4 198.51.100.9\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->rtcp.has_value());
+    REQUIRE(result.value->rtcp->address.has_value());
+    REQUIRE(*result.value->rtcp->address == "198.51.100.9");
+    REQUIRE(result.value->rtcp->addrType.has_value());
+    REQUIRE(*result.value->rtcp->addrType == AddressType::IP4);
+  }
+}
+
+TEST_CASE("Parser: a=rtcp with no usable port is not stored", "[parser][rtcp]")
+{
+  // RFC 3605 §2.1 makes the port mandatory. RtcpAttribute::port is a plain
+  // uint16_t, so leaving it defaulted would fabricate port 0 — indistinguishable
+  // from a legitimate a=rtcp:0, and the serializer would emit it as fact.
+  SECTION("an unparseable port drops the whole attribute")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:abc IN IP4 198.51.100.9\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->rtcp.has_value());
+  }
+
+  SECTION("an out-of-range port drops the whole attribute")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:70000\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->rtcp.has_value());
+  }
+
+  SECTION("a bare a=rtcp drops the whole attribute")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->rtcp.has_value());
+  }
+
+  SECTION("a legitimate a=rtcp:0 IS still stored — the discriminating case")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\na=rtcp:0 IN IP4 198.51.100.9\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->rtcp.has_value());
+    REQUIRE(result.value->rtcp->port == 0);
+  }
+}
+
+TEST_CASE("Parser: an unrecognised nettype or addrtype is not coerced to IN/IP4",
+          "[parser][connection]")
+{
+  // Silently defaulting would both mislabel the address family AND pick the
+  // IPv4 slash grammar, so c=IN IP9 FF15::101/3 would yield an IPv6 literal
+  // tagged IP4 carrying a bogus TTL — and re-serialize as c=IN IP4 FF15::101/3.
+  SECTION("unknown addrtype: the media c= is dropped, the session c= folds down")
+  {
+    const std::string sdp =
+      sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n", "c=IN IP9 FF15::101/3\r\n");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->mediaDescriptions[0].connection.has_value());
+
+    const auto resolved = result.value->effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->addrType == AddressType::IP4);
+    REQUIRE(resolved->address == "198.51.100.9");
+  }
+
+  SECTION("unknown nettype is likewise rejected")
+  {
+    const std::string sdp = sdpWithMediaLines("", "c=TN RFC2543 +1-201-406-4090\r\n");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->mediaDescriptions[0].connection.has_value());
+    REQUIRE(!result.value->effectiveConnection(0).has_value());
+  }
+
+  SECTION("strict mode errors on an unknown addrtype")
+  {
+    const std::string sdp = sdpWithMediaLines("", "c=IN IP9 2001:db8::1\r\n");
+
+    SdpParserOptions opts;
+    opts.strict = true;
+    auto result = SdpParser::parse(sdp, opts);
+    REQUIRE(!result.hasValue());
+    REQUIRE(result.hasError());
+  }
+}
+
+TEST_CASE("Parser: parseMediaSection resolves c= lines", "[parser][connection]")
+{
+  // The third parseConnection call site. It is always lenient — there is no
+  // strict mode for a standalone media section.
+  SECTION("a well-formed media-level c= is stored")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\nc=IN IP4 203.0.113.7\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->connection.has_value());
+    REQUIRE(result.value->connection->address == "203.0.113.7");
+  }
+
+  SECTION("a malformed c= is dropped with a warning, never left empty")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\nc=IN IP4\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->connection.has_value());
+    REQUIRE(!result.warnings.empty());
+  }
+
+  SECTION("a repeated c= keeps the first and warns")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\nc=IN IP4 224.2.1.1/127\r\nc=IN IP4 224.2.1.2/127\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->connection.has_value());
+    REQUIRE(result.value->connection->address == "224.2.1.1");
+    REQUIRE_THAT(result.warnings.back().message,
+                 Catch::Matchers::Contains("layered multicast"));
+  }
+
+  SECTION("parse-before-repeat ordering holds here too")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\nc=IN IP4 203.0.113.7\r\nc=IN IP4\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->connection.has_value());
+    REQUIRE(result.value->connection->address == "203.0.113.7");
+    REQUIRE_THAT(result.warnings.back().message,
+                 Catch::Matchers::Contains("Malformed c="));
+  }
+
+  SECTION("IPv6 multicast /N is an address count here too")
+  {
+    auto result = SdpParser::parseMediaSection(
+      "m=audio 49170 RTP/AVP 0\r\nc=IN IP6 FF15::101/3\r\n");
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->connection.has_value());
+    REQUIRE(!result.value->connection->ttl.has_value());
+    REQUIRE(result.value->connection->numberOfAddresses.has_value());
+    REQUIRE(*result.value->connection->numberOfAddresses == 3);
+  }
+}
+
+TEST_CASE("Parser: effectiveConnection over realistic parsed offers",
+          "[parser][connection]")
+{
+  SECTION("a plain SIP offer folds the session c= down")
+  {
+    const std::string sdp = sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n", "");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    const auto resolved = result.value->effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address == "198.51.100.9");
+  }
+
+  SECTION("an unspecified session address survives the fold-down")
+  {
+    // Deliberately NOT labelled "hold": a bare session-level 0.0.0.0 with
+    // default sendrecv is equally RFC 3264 §8.4's address-not-yet-known case.
+    // The resolver is indifferent either way — that is the point.
+    const std::string sdp = sdpWithMediaLines("c=IN IP4 0.0.0.0\r\n", "");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    const auto resolved = result.value->effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address == "0.0.0.0");
+  }
+
+  SECTION("an a=inactive hold offer resolves its real address unchanged")
+  {
+    // Modern hold (RFC 3264 §8.4) keeps a real connection address; the hold
+    // signal is the direction attribute, which this resolver does not read.
+    const std::string sdp =
+      sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n", "a=inactive\r\n");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    const auto resolved = result.value->effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address == "198.51.100.9");
+  }
+
+  SECTION("a trickle-ICE BUNDLE offer keeps its 0.0.0.0 placeholder per section")
+  {
+    // RFC 8840 §4.1.1 — the placeholder is NOT hold; the real address arrives
+    // via candidates. A real offer of this shape carries a=mid on every grouped
+    // section (RFC 5888 §5 / RFC 8843), DTLS-SRTP over UDP/TLS/RTP/SAVPF with
+    // a=fingerprint + a=setup, and a=ice-options:trickle.
+    const std::string sdp =
+      "v=0\r\n"
+      "o=- 1 1 IN IP4 0.0.0.0\r\n"
+      "s=-\r\n"
+      "t=0 0\r\n"
+      "a=group:BUNDLE 0 1\r\n"
+      "a=ice-ufrag:4ZcD\r\n"
+      "a=ice-pwd:2/1muCWoOi3uLifh0NuRHlZ\r\n"
+      "a=ice-options:trickle\r\n"
+      "a=fingerprint:sha-256 "
+      "12:5A:31:9C:7B:2E:44:8D:6F:01:AB:CD:EF:23:45:67:"
+      "89:0A:BC:DE:F1:23:45:67:89:AB:CD:EF:01:23:45:67\r\n"
+      "a=setup:actpass\r\n"
+      "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=mid:0\r\n"
+      "a=rtcp-mux\r\n"
+      "m=video 9 UDP/TLS/RTP/SAVPF 96\r\n"
+      "c=IN IP4 0.0.0.0\r\n"
+      "a=mid:1\r\n"
+      "a=rtcp-mux\r\n";
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->mediaDescriptions.size() == 2);
+    // The BUNDLE group references these mids, so they must actually be present.
+    REQUIRE(result.value->mediaDescriptions[0].mid == "0");
+    REQUIRE(result.value->mediaDescriptions[1].mid == "1");
+
+    const auto audio = result.value->effectiveConnection(0);
+    const auto video = result.value->effectiveConnection(1);
+    REQUIRE(audio.has_value());
+    REQUIRE(video.has_value());
+    REQUIRE(audio->address == "0.0.0.0");
+    REQUIRE(video->address == "0.0.0.0");
+  }
+
+  SECTION("no c= at any level: every index is nullopt (the malformed contract)")
+  {
+    // This is the shape the consumer must reject; it was only ever asserted at
+    // model level, never over the parser.
+    const std::string sdp = sdpWithMediaLines("", "");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(!result.value->connection.has_value());
+    REQUIRE(!result.value->effectiveConnection(0).has_value());
+  }
+
+  SECTION("mixed-family fold-down: a media-level IPv6 c= over a session IPv4 c=")
+  {
+    // A dual-stack offer — the caller must not infer the family from the
+    // session level.
+    const std::string sdp =
+      sdpWithMediaLines("c=IN IP4 198.51.100.9\r\n", "c=IN IP6 2001:db8::1\r\n");
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    const auto resolved = result.value->effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->addrType == AddressType::IP6);
+    REQUIRE(resolved->address == "2001:db8::1");
+  }
+
+  SECTION("a rejected stream still resolves its address")
+  {
+    const std::string sdp =
+      "v=0\r\n"
+      "o=- 1 1 IN IP4 198.51.100.9\r\n"
+      "s=-\r\n"
+      "c=IN IP4 198.51.100.9\r\n"
+      "t=0 0\r\n"
+      "m=audio 49170 RTP/AVP 0\r\n"
+      "m=video 0 RTP/AVP 31\r\n";
+
+    auto result = SdpParser::parse(sdp);
+    REQUIRE(result.hasValue());
+    REQUIRE(result.value->mediaDescriptions.size() == 2);
+    REQUIRE(result.value->mediaDescriptions[1].port == 0);
+
+    const auto rejected = result.value->effectiveConnection(1);
+    REQUIRE(rejected.has_value());
+    REQUIRE(rejected->address == "198.51.100.9");
+  }
 }

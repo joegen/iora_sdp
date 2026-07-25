@@ -483,3 +483,371 @@ TEST_CASE("SessionDescription: inequality — any field difference", "[session][
   diffMedia.mediaDescriptions.push_back(MediaDescription{});
   REQUIRE(base != diffMedia);
 }
+
+// ---------------------------------------------------------------------------
+// SessionDescription::effectiveConnection — RFC 4566 §5.7 c= fold-down
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Builds an audio media section with no media-level c=.
+MediaDescription audioSection()
+{
+  MediaDescription m;
+  m.mediaType = MediaType::AUDIO;
+  m.port = 49170;
+  m.protocol = TransportProtocol::RTP_AVP;
+  return m;
+}
+
+ConnectionData ip4(const std::string& address)
+{
+  ConnectionData c;
+  c.netType = NetworkType::IN;
+  c.addrType = AddressType::IP4;
+  c.address = address;
+  return c;
+}
+
+ConnectionData ip6(const std::string& address)
+{
+  ConnectionData c;
+  c.netType = NetworkType::IN;
+  c.addrType = AddressType::IP6;
+  c.address = address;
+  return c;
+}
+
+} // namespace
+
+TEST_CASE("effectiveConnection: precedence cube", "[session][effectiveConnection]")
+{
+  // Session and media addresses are DISTINCT throughout, so each case
+  // discriminates media-precedence from session-fallback rather than merely
+  // observing "some value came back".
+  const ConnectionData sessionConn = ip4("192.0.2.1");
+  const ConnectionData mediaConn = ip4("198.51.100.9");
+  REQUIRE(sessionConn != mediaConn);
+
+  SECTION("session-only: a real media section exists but omits its own c=")
+  {
+    // A REAL section at index 0 — NOT an empty media list, which would resolve
+    // through the out-of-range path and prove nothing about the fold-down.
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    sd.mediaDescriptions.push_back(audioSection());
+    REQUIRE(!sd.mediaDescriptions[0].connection.has_value());
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == sessionConn);
+  }
+
+  SECTION("media-only: no session c=")
+  {
+    SessionDescription sd;
+    REQUIRE(!sd.connection.has_value());
+    MediaDescription m = audioSection();
+    m.connection = mediaConn;
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == mediaConn);
+  }
+
+  SECTION("both present: the media-level c= wins")
+  {
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    MediaDescription m = audioSection();
+    m.connection = mediaConn;
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == mediaConn);
+    REQUIRE(*resolved != sessionConn);
+  }
+
+  SECTION("neither present: nullopt for an in-range index")
+  {
+    SessionDescription sd;
+    sd.mediaDescriptions.push_back(audioSection());
+
+    REQUIRE(!sd.effectiveConnection(0).has_value());
+  }
+
+  SECTION("callable through a const reference")
+  {
+    // The pinned signature is a const member so a consumer can resolve through
+    // a `const SessionDescription&`; without this, dropping const still passes.
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    sd.mediaDescriptions.push_back(audioSection());
+
+    const SessionDescription& constSd = sd;
+    const auto resolved = constSd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == sessionConn);
+  }
+}
+
+TEST_CASE("effectiveConnection: value preserved verbatim",
+          "[session][effectiveConnection]")
+{
+  SECTION("IPv6 address and addrType survive the fold-down")
+  {
+    SessionDescription sd;
+    sd.connection = ip6("2001:db8::1");
+    sd.mediaDescriptions.push_back(audioSection());
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->addrType == AddressType::IP6);
+    REQUIRE(resolved->address == "2001:db8::1");
+  }
+
+  SECTION("multicast ttl and address count are returned intact")
+  {
+    ConnectionData multicast = ip4("224.2.1.1");
+    multicast.ttl = 127;
+    multicast.numberOfAddresses = 3;
+
+    SessionDescription sd;
+    MediaDescription m = audioSection();
+    m.connection = multicast;
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == multicast);
+  }
+
+  SECTION("multicast fields survive the session-level fold-down too")
+  {
+    // The accessor has two distinct return statements; the media-level one is
+    // covered above. Without this, a session branch that rebuilt a partial
+    // ConnectionData would pass every other assertion.
+    ConnectionData multicast = ip4("224.2.1.1");
+    multicast.ttl = 127;
+    multicast.numberOfAddresses = 3;
+
+    SessionDescription sd;
+    sd.connection = multicast;
+    sd.mediaDescriptions.push_back(audioSection());
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == multicast);
+  }
+
+  SECTION("a present-but-EMPTY address is returned present and empty")
+  {
+    // Pins the documented address-usability contract: the resolver returns
+    // model state and validates nothing, so has_value() is NOT the acceptance
+    // test. A "helpful" empty-address -> nullopt normalisation would silently
+    // invert the contract the RTP-1.g adapter is written against.
+    SessionDescription sd;
+    MediaDescription m = audioSection();
+    ConnectionData blank;
+    blank.address = "";
+    m.connection = blank;
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address.empty());
+  }
+
+  SECTION("an empty session-level address folds down present and empty too")
+  {
+    SessionDescription sd;
+    ConnectionData blank;
+    blank.address = "";
+    sd.connection = blank;
+    sd.mediaDescriptions.push_back(audioSection());
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address.empty());
+  }
+
+  SECTION("an FQDN address passes through unresolved")
+  {
+    SessionDescription sd;
+    sd.connection = ip4("host.example.com");
+    sd.mediaDescriptions.push_back(audioSection());
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address == "host.example.com");
+  }
+
+  SECTION("multi-m= mixed placement resolves each index independently")
+  {
+    const ConnectionData sessionConn = ip4("192.0.2.1");
+    const ConnectionData videoConn = ip4("198.51.100.9");
+
+    SessionDescription sd;
+    sd.connection = sessionConn;
+
+    sd.mediaDescriptions.push_back(audioSection());  // index 0: session-level
+
+    MediaDescription video = audioSection();
+    video.mediaType = MediaType::VIDEO;
+    video.connection = videoConn;
+    sd.mediaDescriptions.push_back(video);           // index 1: media-level
+
+    sd.mediaDescriptions.push_back(audioSection());  // index 2: session-level
+
+    const auto first = sd.effectiveConnection(0);
+    const auto second = sd.effectiveConnection(1);
+    const auto third = sd.effectiveConnection(2);
+
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    REQUIRE(third.has_value());
+    REQUIRE(*first == sessionConn);
+    REQUIRE(*second == videoConn);
+    REQUIRE(*third == sessionConn);
+  }
+}
+
+TEST_CASE("effectiveConnection: out-of-range never falls back to the session c=",
+          "[session][effectiveConnection]")
+{
+  const ConnectionData sessionConn = ip4("192.0.2.1");
+
+  SECTION("one past the end of a non-empty media list")
+  {
+    // Two sections, queried at index 2 — the exact one-past boundary. A `<=`
+    // mis-guard would read one past the end here; a session-fallback bug would
+    // return sessionConn.
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    sd.mediaDescriptions.push_back(audioSection());
+    sd.mediaDescriptions.push_back(audioSection());
+    REQUIRE(sd.mediaDescriptions.size() == 2);
+
+    REQUIRE_NOTHROW(sd.effectiveConnection(2));
+    REQUIRE(!sd.effectiveConnection(2).has_value());
+
+    // The last valid index still resolves, so the guard is not simply refusing
+    // everything.
+    const auto lastValid = sd.effectiveConnection(1);
+    REQUIRE(lastValid.has_value());
+    REQUIRE(*lastValid == sessionConn);
+  }
+
+  SECTION("empty media list with a session c= present")
+  {
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    REQUIRE(sd.mediaDescriptions.empty());
+
+    REQUIRE_NOTHROW(sd.effectiveConnection(0));
+    REQUIRE(!sd.effectiveConnection(0).has_value());
+  }
+
+  SECTION("a far out-of-range index does not throw")
+  {
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    sd.mediaDescriptions.push_back(audioSection());
+
+    REQUIRE_NOTHROW(sd.effectiveConnection(1000));
+    REQUIRE(!sd.effectiveConnection(1000).has_value());
+  }
+}
+
+TEST_CASE("effectiveConnection: unspecified-address sentinels fold down "
+          "byte-identical",
+          "[session][effectiveConnection]")
+{
+  // The resolver is deliberately address-blind. 0.0.0.0 and :: carry different
+  // meanings depending on context (RFC 3264 §8.4 legacy hold vs RFC 8840 §4.1.1
+  // trickle-ICE placeholder), and disambiguating them is the caller's job — so
+  // these assert only that the bytes survive, not what they mean.
+  SECTION("a real media-level c= overrides a session-level 0.0.0.0")
+  {
+    const ConnectionData mediaConn = ip4("198.51.100.9");
+
+    SessionDescription sd;
+    sd.connection = ip4("0.0.0.0");
+    MediaDescription m = audioSection();
+    m.connection = mediaConn;
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == mediaConn);
+    REQUIRE(resolved->address == "198.51.100.9");
+  }
+
+  SECTION("a media-level 0.0.0.0 overrides a real session c=")
+  {
+    SessionDescription sd;
+    sd.connection = ip4("192.0.2.1");
+    MediaDescription m = audioSection();
+    m.connection = ip4("0.0.0.0");
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    // Byte-identical: no special-casing of the hold address into nullopt.
+    REQUIRE(resolved->address == "0.0.0.0");
+    REQUIRE(resolved->addrType == AddressType::IP4);
+  }
+
+  SECTION("the IPv6 :: sentinel is likewise preserved")
+  {
+    SessionDescription sd;
+    sd.connection = ip6("2001:db8::1");
+    MediaDescription m = audioSection();
+    m.connection = ip6("::");
+    sd.mediaDescriptions.push_back(m);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved->address == "::");
+    REQUIRE(resolved->addrType == AddressType::IP6);
+  }
+}
+
+TEST_CASE("effectiveConnection: a rejected (port 0) stream resolves normally",
+          "[session][effectiveConnection]")
+{
+  // Stream rejection is signalled by the m= port, never by the connection
+  // address (RFC 3264 §6 to reject, §8.2 to remove). The fold-down must not special-
+  // case a port-0 section, or a caller loses the address of a rejected stream.
+  const ConnectionData sessionConn = ip4("192.0.2.1");
+  const ConnectionData mediaConn = ip4("198.51.100.9");
+
+  SECTION("port 0 with no media-level c= still folds the session c= down")
+  {
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    MediaDescription rejected = audioSection();
+    rejected.port = 0;
+    sd.mediaDescriptions.push_back(rejected);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == sessionConn);
+  }
+
+  SECTION("port 0 with its own c= still returns the media-level value")
+  {
+    SessionDescription sd;
+    sd.connection = sessionConn;
+    MediaDescription rejected = audioSection();
+    rejected.port = 0;
+    rejected.connection = mediaConn;
+    sd.mediaDescriptions.push_back(rejected);
+
+    const auto resolved = sd.effectiveConnection(0);
+    REQUIRE(resolved.has_value());
+    REQUIRE(*resolved == mediaConn);
+  }
+}

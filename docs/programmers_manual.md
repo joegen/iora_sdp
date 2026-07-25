@@ -900,7 +900,11 @@ o.address = "192.168.1.100";
 
 ### ConnectionData
 
-Maps to `c=<netType> <addrType> <address>[/<ttl>][/<numAddresses>]`.
+Maps to `c=<netType> <addrType> <address>`, plus the address-family-dependent multicast slash
+notation: IPv4 is `<address>/<ttl>[/<numAddresses>]`, IPv6 is `<address>[/<numAddresses>]` —
+RFC 4566 §5.7 forbids a TTL for IPv6 multicast. Consequently `numberOfAddresses` is only
+serialisable for IPv4 when `ttl` is also set, and an IPv6 `ttl` is omitted on serialization. An
+unrecognised `netType`/`addrType` is rejected rather than coerced to `IN`/`IP4`.
 
 ```cpp
 struct ConnectionData
@@ -1107,6 +1111,10 @@ struct SessionDescription
 
   // Media sections
   std::vector<MediaDescription> mediaDescriptions;             // ordered list of m= blocks
+
+  // RFC 4566 §5.7 connection fold-down
+  std::optional<ConnectionData>
+    effectiveConnection(std::size_t mediaIndex) const;
 };
 ```
 
@@ -1126,6 +1134,90 @@ session.timeDescriptions.push_back({0, 0, {}});
 
 **Session-level attribute inheritance:** Session-level ICE credentials (`iceUfrag`, `icePwd`),
 fingerprints, and setup role apply to all media sections that do not override them at the media level.
+The same is true of the connection address (`c=`), which has a dedicated resolver.
+
+**`effectiveConnection(mediaIndex)` — RFC 4566 §5.7 fold-down:** resolves the connection data that
+actually applies to one media section: the media-level `c=` when the index is in range and carries
+one, otherwise the session-level `c=`, otherwise `std::nullopt`.
+
+```cpp
+auto result = SdpParser::parse(offer);
+if (result.hasValue())
+{
+  if (auto conn = result.value->effectiveConnection(0))
+  {
+    // conn->address is the address that applies to media section 0
+  }
+}
+```
+
+| Behaviour | Rule |
+|---|---|
+| Precedence | Media-level `c=` overrides session-level `c=` (§5.7). |
+| Out-of-range index | Returns `std::nullopt` and **never** falls back to the session `c=` — §5.7 scopes a `c=` to an *existing* stream, so answering would fabricate a connection. Bounds-checked before indexing; never throws of its own accord. |
+| `nullopt` for an in-range index | The description is malformed: §5.7 makes a session-level `c=` mandatory unless every media section supplies its own. Reject it — do not default or fabricate an empty address. |
+| Address usability | A *present* `ConnectionData` may still carry an empty or ill-formed `address` — the resolver returns model state faithfully and validates nothing. Reject an unusable address exactly as you would `nullopt`; `has_value()` alone is not the check. |
+| Value fidelity | The whole `ConnectionData` is returned verbatim — multicast `ttl`/`numberOfAddresses`, IPv6, FQDNs, and the `0.0.0.0` / `::` sentinels are never inspected, normalised, or collapsed to `nullopt`. |
+| Direction | Inbound only: it folds down a *received* description. An outbound description takes its address from the local session identity. |
+
+**An unspecified address cannot be classified from the address alone.** `0.0.0.0` and `::` have
+three distinct producers, and nothing in the address distinguishes them:
+
+1. **RFC 2543 legacy hold**, in a *mid-session* offer. RFC 3264 §8.4 records the mechanism and no
+   longer recommends it.
+2. **An initial offer whose address is not yet known.** §8.4: it "can be useful in an initial offer
+   when the offerer knows it wants to use a particular set of media streams and formats, but
+   doesn't know the addresses and ports at the time of the offer." A gateway or B2BUA composing an
+   offer before allocating media ports emits exactly this — with no ICE attributes — and is *not*
+   on hold. §8.4 adds that when the address is used this way "the port number MUST NOT be zero",
+   which is what keeps this case distinguishable from a rejected stream.
+3. **A trickle-ICE placeholder** (RFC 8840 §4.1.1), with `m=` port 9 — §4.1.1 makes the port a MUST
+   for a media description with no candidate yet, while the `0.0.0.0`/`::` address is a SHOULD; the
+   real address arrives via candidates.
+
+So a rule of the form "`0.0.0.0` without ICE attributes means hold" is wrong. RFC 3264 §8.4 also
+states the `0.0.0.0` mechanism "doesn't work with IPv6" and defines no IPv6 hold analog, so no RFC
+assigns `::` a hold meaning — RFC 8840 §4.1.1 calls it "the IPv6 equivalent" of the `0.0.0.0`
+placeholder. Modern hold is `a=sendonly` / `a=inactive` with a *real* address.
+
+The one normative rule that applies whichever producer it was: RFC 3264 §8.4 requires an agent to
+**be capable of receiving** SDP with a connection address of `0.0.0.0` — such an offer must not be
+rejected — "in which case it means that neither RTP nor RTCP should be sent to the peer." (The MUST
+attaches to accepting the SDP; the send suppression is a lowercase "should".) The same treatment
+applies to `::`.
+
+**Stream rejection is the `m=` port, not the address** — RFC 3264 §6.1 to reject an offered stream,
+§8.2 to remove an existing one. One exception: under BUNDLE, RFC 8843 §6 has an offerer that wants a
+section only if it is bundled set a zero port *and* include `a=bundle-only`, so a zero port **with**
+`a=bundle-only` is not a rejection. The same applies when reading an **answer**: RFC 8843 §7.3 has
+the answerer assign the shared BUNDLE address:port to the answerer-tagged section and a zero port
+plus `a=bundle-only` to *every other* bundled section — so in a BUNDLE answer a zero port on a
+bundled section is the norm, not a rejection. iora_sdp does not model `a=bundle-only` — it lands in
+the generic attributes — so a BUNDLE-aware consumer must check for it there.
+
+**The resolved `c=` is not necessarily the transport.** Under ICE the address comes from the
+nominated candidate pair; `a=rtcp` (RFC 3605) can move RTCP elsewhere; and under BUNDLE the bundled
+sections share one address:port — but only *after* negotiation. In an **initial offer**
+(RFC 8843 §7.2) the offerer assigns a unique address:port to each bundled `m=` section except
+`bundle-only` ones, so a non-tagged section's own `c=` is meaningful there and must not be
+discarded; §7.3 establishes the single shared BUNDLE address:port in the answer.
+
+**After a lenient parse**, a returned value may be the session-level `c=` standing in for a
+media-level override that was dropped as malformed — `std::nullopt` cannot express "override present
+but unusable". Two remedies exist, and both are blunter than they may appear:
+
+- **Treat any `Malformed c=` warning as poisoning the whole description.** `ParseWarning` carries
+  `{line, message}` only — there is no media index — so a caller cannot determine *which* section's
+  resolved address is now a substitute without re-tokenising the SDP and correlating line numbers
+  against `m=` offsets. Per-section trust is not derivable from the warning list today.
+- **Re-parse with `strict = true`**, which rejects the description outright. Note this is available
+  on `SdpParser::parse()` only — `parseMediaSection()` takes no options and is always lenient, so a
+  consumer of `application/trickle-ice-sdpfrag` fragments has neither remedy.
+
+**Model limitation:** one optional `ConnectionData` per level. The slash notation
+`<base>/<ttl>/<count>` (which §5.7 calls semantically identical to multiple `c=` lines) is carried
+verbatim; what cannot be represented is a media section with several *separate* `c=` lines naming
+distinct base addresses.
 
 ---
 
@@ -1346,6 +1438,15 @@ The parser operates in two phases:
 
 - Unique attributes (`ice-ufrag`, `ice-pwd`, `mid`, `setup`): overwrite-with-warning in lenient mode, error in strict mode.
 - Multi-value attributes (`candidate`, `ssrc`, `rtpmap`, `fmtp`, `rtcp-fb`, `extmap`, etc.): always append.
+- `c=` lines are handled separately from `a=` attributes, and the two levels differ. A repeated
+  **media-level** `c=` is legal SDP only when the addresses are multicast layers of a hierarchical
+  encoding — §5.7's permission is conditional. The parser treats the address as an opaque string
+  (FQDNs are legal there), so it cannot classify multicast and does not enforce the condition: a
+  repeated *unicast* media-level `c=` is accepted the same way, a known limitation. It is a shape
+  the one-`c=`-per-level model cannot represent, so it warns in **both** modes and keeps the
+  **first** line — the base layer. A repeated **session-level** `c=` is forbidden by §5.7, so it warns and
+  keeps the first in lenient mode and is a fatal error in strict mode. Note `c=` keeps the *first*
+  where unique `a=` attributes keep the *last*.
 
 ### Lenient vs. Strict Mode
 
@@ -1355,6 +1456,9 @@ The parser operates in two phases:
 | Leading/trailing whitespace | Trimmed | Fatal error |
 | Line exceeds `maxLineLength` | Skip + warning | Fatal error |
 | Duplicate unique attribute | Overwrite + warning | Fatal error |
+| Malformed `c=` line | Skip + warning (level left unset, so a session-level `c=` folds down) | Fatal error |
+| Repeated media-level `c=` | Warning, first kept | Warning, first kept — §5.7 permits repeats only for multicast layers, and the parser cannot classify the address, so unicast repeats are accepted too (see above) |
+| Repeated session-level `c=` | Warning, first kept | Fatal error |
 | Unexpected line type | Skip + warning | Fatal error |
 | Missing `v=` line | Error if `requireVersion` | Error |
 
@@ -2239,6 +2343,9 @@ REQUIRE(*r1.value == *r2.value);  // data model equivalence
 
 - Media-level `i=` lines (parsed but not stored on `MediaDescription`)
 - Duplicate unique attributes (last one wins in lenient mode)
+- A malformed `c=` line (dropped entirely) and any `c=` line after the first at a given level
+- An IPv6 `ttl`, and an IPv4 `numberOfAddresses` with no `ttl` — neither is representable on the
+  wire, so both are omitted on serialization
 - SDP has no comment syntax, so there is nothing to lose
 
 ---
@@ -2290,6 +2397,8 @@ std::optional<SessionDescription> safeParse(
 | `Duplicate a=ice-ufrag` | Strict mode with duplicate unique attribute |
 | `Malformed line: missing type=value format` | Line doesn't match `x=value` pattern |
 | `Leading/trailing whitespace in strict mode` | Whitespace present in strict mode |
+| `Malformed c= line` | Strict mode with an unparseable `c=` (bad grammar, surplus token, unknown nettype/addrtype, IPv6 carrying a TTL) |
+| `Duplicate session-level c= line` | Strict mode with more than one session-level `c=` (RFC 4566 §5.7 MUST NOT) |
 
 ### Warning Patterns in Lenient Mode
 
@@ -2297,6 +2406,9 @@ Common warnings returned in `ParseResult::warnings`:
 
 - `"Malformed line, skipping"` — unparseable line was skipped
 - `"Duplicate a=ice-ufrag at session level, overwriting"` — duplicate unique attribute
+- `"Malformed c= line, skipping"` — the `c=` was dropped; any session-level `c=` folds down instead
+- `"Multiple media-level c= lines (layered multicast, RFC 4566 5.7) are not representable; keeping the first"`
+- `"Duplicate session-level c= line, keeping the first"`
 - `"Line exceeds maxLineLength, skipping"` — long line was skipped
 - `"Unexpected line type 'X' in media section, skipping"` — unexpected character after `m=`
 - `"SDP version is not 0"` — non-zero version number
@@ -2318,7 +2430,13 @@ for (const auto& w : result.warnings)
 Best practices:
 
 1. Always check `hasError()` before accessing `value`
-2. Log warnings for debugging but do not fail on them
+2. Log warnings for debugging. Most warnings are safe to continue on — but the
+   `c=` warnings are not: `"Malformed c= line, skipping"` and
+   `"Multiple media-level c= lines..."` change what `effectiveConnection` returns
+   (a dropped media-level override lets the session-level `c=` fold down in its
+   place), so media could be sent to an address the peer never designated for
+   that stream. Act on those — reject the description, or re-parse with
+   `strict = true` — rather than only logging them. See §4, "effectiveConnection".
 3. Set conservative `maxLineLength` and `maxMediaSections` for public-facing servers
 4. Use lenient mode for production, strict mode for validation/testing
 5. Handle the case where optional fields are absent (e.g., no ICE candidates yet)
@@ -2490,7 +2608,7 @@ coverage.
 
 | RFC | Title | Coverage |
 |-----|-------|----------|
-| RFC 4566 | SDP: Session Description Protocol | Full parsing/serialization of all fields |
+| RFC 4566 | SDP: Session Description Protocol | Parsing/serialization of all session and media fields, with the documented exceptions in §9 "Does NOT round-trip" and the §4 `c=` model limitation (no media-level `i=`; no repeated media-level `c=`; only `IN` / `IP4`,`IP6` accepted) |
 | RFC 8866 | SDP: Session Description Protocol (obsoletes 4566) | Same wire format, deprecates `k=` |
 | RFC 3264 | An Offer/Answer Model with SDP | Direction semantics, offer/answer utilities |
 | RFC 3551 | RTP Profile for Audio and Video Conferences | rtpmap encoding names, clock rates |
@@ -2595,6 +2713,12 @@ coverage.
 | `RidAttribute` | `attributes.hpp` | `a=rid` | RFC 8851 |
 | `GenericAttribute` | `attributes.hpp` | (any unrecognized) | — |
 
+### Member Functions -- Data Model
+
+| Type | Method | Signature | Purpose |
+|------|--------|-----------|---------|
+| `SessionDescription` | `effectiveConnection` | `std::optional<ConnectionData> effectiveConnection(std::size_t mediaIndex) const` | RFC 4566 §5.7 `c=` fold-down: media-level overrides session-level; `nullopt` when out of range or when neither level carries a `c=` |
+
 ### Structs -- Parser/Serializer
 
 | Struct | Header | Purpose |
@@ -2604,6 +2728,20 @@ coverage.
 | `ParseResult<T>` | `sdp_parser.hpp` | Parse result container (value + error + warnings) |
 | `SdpParserOptions` | `sdp_parser.hpp` | Parser configuration (7 fields) |
 | `SdpSerializerOptions` | `sdp_serializer.hpp` | Serializer configuration (3 fields) |
+
+**Connection address:** `createOffer` and `createAnswer` deliberately set **no `c=` at either
+level** — the connection address is the caller's to supply, because only the caller knows its own
+media address. Until you assign one, the result is incomplete per RFC 4566 §5.7 and
+`effectiveConnection` returns `std::nullopt` for every index (see §4). Assign
+`session.connection = ConnectionData{...}` (or a per-`m=` `c=`) before serializing:
+
+```cpp
+auto offer = OfferAnswer::createOffer();
+ConnectionData conn;
+conn.address = "192.0.2.1";        // your media address
+offer.connection = conn;            // REQUIRED before serializing
+auto sdp = SdpSerializer::serialize(offer);
+```
 
 ### Structs -- Offer/Answer Options
 

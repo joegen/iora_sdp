@@ -3,6 +3,7 @@
 /// @file session_description.hpp
 /// @brief Core data model — SessionDescription, MediaDescription, and supporting structs.
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -46,8 +47,14 @@ struct ConnectionData
   NetworkType netType = NetworkType::IN;
   AddressType addrType = AddressType::IP4;
   std::string address;                 ///< Connection address
-  std::optional<std::uint8_t> ttl;     ///< Multicast TTL (IPv4 only)
-  std::optional<std::uint16_t> numberOfAddresses; ///< Number of multicast addresses
+  /// Multicast TTL. IPv4 only — RFC 4566 §5.7 forbids a TTL for IPv6 multicast,
+  /// so the parser rejects a c= carrying one and the serializer omits it when
+  /// addrType is IP6.
+  std::optional<std::uint8_t> ttl;
+  /// Number of contiguous multicast addresses. For IPv4 the wire grammar is
+  /// `<base>/<ttl>/<count>`, so this is only serialisable when @ref ttl is also
+  /// set; for IPv6 it is the only slash group and stands alone.
+  std::optional<std::uint16_t> numberOfAddresses;
 
   bool operator==(const ConnectionData& other) const noexcept
   {
@@ -255,6 +262,75 @@ struct SessionDescription
   std::vector<FingerprintAttribute> fingerprints;
   std::optional<SetupRole> setup;
   bool extmapAllowMixed = false;       ///< a=extmap-allow-mixed (RFC 8285)
+
+  /// Resolves the effective connection data for one media section (RFC 4566
+  /// §5.7): a media-level c= overrides the session-level c=, and a session-level
+  /// c= applies to every media section that omits its own.
+  ///
+  /// @param mediaIndex Index into @ref mediaDescriptions.
+  /// @return The media-level c= when @p mediaIndex is in range and carries one;
+  ///         otherwise the session-level c= when @p mediaIndex is in range;
+  ///         otherwise `std::nullopt`.
+  ///
+  /// The call is total: an out-of-range index yields `std::nullopt` — never the
+  /// session-level c= — and no exception is thrown (only the returned copy can
+  /// propagate an allocation failure). RFC 4566 §5 scopes session-level
+  /// information to the media OF THAT SESSION, and §5.7's per-media values
+  /// override it "for the respective media"; an index past the last section
+  /// names no stream, so answering with the session address would fabricate a
+  /// connection.
+  ///
+  /// @note The returned ConnectionData is never inspected or normalized. Every
+  ///   value — the unspecified-address sentinels `0.0.0.0` and `::`, FQDNs,
+  ///   multicast groups — is returned verbatim. Collapsing a sentinel into
+  ///   `std::nullopt` here would destroy the signal callers depend on.
+  ///
+  /// @note Direction: this folds down the c= of a *received* description. An
+  ///   outbound description takes its connection address from the local session
+  ///   identity, never from here.
+  ///
+  /// @note A `std::nullopt` for an in-range index means the description is
+  ///   malformed and unusable — §5.7 makes a session-level c= mandatory unless
+  ///   every media section supplies its own. Callers reject such a description
+  ///   rather than defaulting or fabricating an empty address. A *present*
+  ///   value is not automatically a usable one either: ConnectionData is
+  ///   returned verbatim and validated against nothing, so a programmatically
+  ///   built description can carry a present-but-empty or ill-formed address.
+  ///   Callers check the address is non-empty and well formed for its addrType
+  ///   and reject it exactly as they reject `std::nullopt` — `has_value()`
+  ///   alone is not the acceptance test.
+  ///
+  /// @note Two things this value is NOT. It is not necessarily the media
+  ///   transport — ICE and BUNDLE can put that elsewhere, and `a=rtcp`
+  ///   (RFC 3605) can move the RTCP destination alone — and an unspecified
+  ///   address (`0.0.0.0` or `::`) is
+  ///   not classifiable from the address alone, so it does not by itself mean
+  ///   hold. After a lenient parse the value may also be the session-level c=
+  ///   standing in for a media-level override that was dropped as malformed.
+  ///   The RFC citations and the rules a caller must follow for all three are
+  ///   in docs/programmers_manual.md §4, "effectiveConnection".
+  ///
+  /// @note Model limitation: one optional ConnectionData per level. The slash
+  ///   notation `<base>/<ttl>/<count>`, which §5.7 calls semantically identical
+  ///   to multiple c= lines, IS carried verbatim; what cannot be represented is
+  ///   a media section carrying several *separate* c= lines with distinct base
+  ///   addresses.
+  std::optional<ConnectionData> effectiveConnection(std::size_t mediaIndex) const
+  {
+    if (mediaIndex >= mediaDescriptions.size())
+    {
+      return std::nullopt;
+    }
+
+    const std::optional<ConnectionData>& mediaLevel =
+      mediaDescriptions[mediaIndex].connection;
+    if (mediaLevel.has_value())
+    {
+      return mediaLevel;
+    }
+
+    return connection;
+  }
 
   bool operator==(const SessionDescription& other) const noexcept
   {

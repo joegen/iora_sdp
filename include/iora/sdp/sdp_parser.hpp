@@ -301,48 +301,102 @@ inline Origin parseOrigin(std::string_view value)
   return o;
 }
 
-inline ConnectionData parseConnection(std::string_view value)
+/// Parses a c= value (RFC 4566 §5.7) into ConnectionData.
+///
+/// Returns std::nullopt when the line is unusable. A malformed c= MUST NOT
+/// yield a default-constructed ConnectionData: at a media section that value
+/// would be an engaged-but-empty override that hides an otherwise valid
+/// session-level c= from SessionDescription::effectiveConnection.
+///
+/// The multicast slash notation is address-type dependent. IPv4 is
+/// `<base>/<ttl>[/<count>]`; IPv6 is `<base>[/<count>]`, because §5.7 states
+/// the TTL "MUST NOT be present for IPv6 multicast". Since the grammar is
+/// selected by the address type, an unrecognised nettype or addrtype is a
+/// failure rather than a silent fallback to IN/IP4 — coercing it would both
+/// mislabel the address family and pick the wrong slash grammar.
+///
+/// The slash groups are decoded structurally: the address is treated as an
+/// opaque string (FQDNs are legal here), so they are NOT validated against the
+/// address actually being multicast, and `ttl` / `numberOfAddresses` are not on
+/// their own a multicast discriminator. For the same reason §5.7's "IPv4
+/// multicast MUST have a TTL" rule is not enforced. Numeric leniency is
+/// deliberate: `parseUint8` / `parseUint16` accept leading zeros, which the
+/// §5.7 ABNF `integer = POS-DIGIT *DIGIT` forbids. Conversely the ABNF admits
+/// a ten-digit address count where the model carries a `std::uint16_t`, so a
+/// count above 65535 fails the whole line — an accepted model limitation.
+inline std::optional<ConnectionData> parseConnection(std::string_view value)
 {
   ConnectionData c;
   std::istringstream iss{std::string(value)};
   std::string netTypeStr, addrTypeStr, address;
-  if (iss >> netTypeStr >> addrTypeStr >> address)
+  if (!(iss >> netTypeStr >> addrTypeStr >> address))
   {
-    if (auto nt = networkTypeFromString(netTypeStr))
-    {
-      c.netType = *nt;
-    }
-    if (auto at = addressTypeFromString(addrTypeStr))
-    {
-      c.addrType = *at;
-    }
-    auto slash = address.find('/');
-    if (slash != std::string::npos)
-    {
-      auto rest = address.substr(slash + 1);
-      address = address.substr(0, slash);
-      auto slash2 = rest.find('/');
-      if (slash2 != std::string::npos)
-      {
-        if (auto ttl = parseUint8(std::string_view(rest).substr(0, slash2)))
-        {
-          c.ttl = *ttl;
-        }
-        if (auto num = parseUint16(std::string_view(rest).substr(slash2 + 1)))
-        {
-          c.numberOfAddresses = *num;
-        }
-      }
-      else
-      {
-        if (auto ttl = parseUint8(rest))
-        {
-          c.ttl = *ttl;
-        }
-      }
-    }
-    c.address = address;
+    return std::nullopt;
   }
+
+  // §5.7 defines exactly three subfields; a surplus token is malformed.
+  std::string surplus;
+  if (iss >> surplus)
+  {
+    return std::nullopt;
+  }
+
+  auto nt = networkTypeFromString(netTypeStr);
+  auto at = addressTypeFromString(addrTypeStr);
+  if (!nt || !at)
+  {
+    return std::nullopt;
+  }
+  c.netType = *nt;
+  c.addrType = *at;
+
+  auto slash = address.find('/');
+  if (slash != std::string::npos)
+  {
+    auto rest = address.substr(slash + 1);
+    address = address.substr(0, slash);
+    auto slash2 = rest.find('/');
+    if (slash2 != std::string::npos)
+    {
+      if (c.addrType == AddressType::IP6)
+      {
+        return std::nullopt;
+      }
+      auto ttl = parseUint8(std::string_view(rest).substr(0, slash2));
+      auto num = parseUint16(std::string_view(rest).substr(slash2 + 1));
+      if (!ttl || !num)
+      {
+        return std::nullopt;
+      }
+      c.ttl = *ttl;
+      c.numberOfAddresses = *num;
+    }
+    else if (c.addrType == AddressType::IP6)
+    {
+      auto num = parseUint16(rest);
+      if (!num)
+      {
+        return std::nullopt;
+      }
+      c.numberOfAddresses = *num;
+    }
+    else
+    {
+      auto ttl = parseUint8(rest);
+      if (!ttl)
+      {
+        return std::nullopt;
+      }
+      c.ttl = *ttl;
+    }
+  }
+
+  if (address.empty())
+  {
+    return std::nullopt;
+  }
+
+  c.address = address;
   return c;
 }
 
@@ -659,21 +713,43 @@ inline CryptoAttribute parseCrypto(std::string_view value)
   return attr;
 }
 
-inline RtcpAttribute parseRtcp(std::string_view value)
+/// Parses an a=rtcp value (RFC 3605 §2.1) into RtcpAttribute.
+///
+/// Returns std::nullopt when the line is unusable. The port is mandatory —
+/// `rtcp-attribute = "a=rtcp:" port [nettype SP addrtype SP address]` — and
+/// RtcpAttribute::port is a plain uint16_t, so leaving it at its default would
+/// fabricate RTCP port 0: an destination indistinguishable from a legitimate
+/// `a=rtcp:0`, which the serializer would then emit as fact.
+inline std::optional<RtcpAttribute> parseRtcp(std::string_view value)
 {
   RtcpAttribute attr;
   std::istringstream iss{std::string(value)};
   std::string token;
-  if (iss >> token)
+  if (!(iss >> token))
   {
-    if (auto p = parseUint16(token)) attr.port = *p;
+    return std::nullopt;
   }
+  auto port = parseUint16(token);
+  if (!port)
+  {
+    return std::nullopt;
+  }
+  attr.port = *port;
   std::string ntStr, atStr, addrStr;
   if (iss >> ntStr >> atStr >> addrStr)
   {
-    if (auto nt = networkTypeFromString(ntStr)) attr.netType = *nt;
-    if (auto at = addressTypeFromString(atStr)) attr.addrType = *at;
-    attr.address = addrStr;
+    // Store the address only alongside a recognised family. A half-populated
+    // attribute (address present, family absent) names an RTCP destination the
+    // serializer then drops silently — and RFC 3605 §2.1 gives the address
+    // meaning only in company with its network and address type.
+    auto nt = networkTypeFromString(ntStr);
+    auto at = addressTypeFromString(atStr);
+    if (nt && at)
+    {
+      attr.netType = *nt;
+      attr.addrType = *at;
+      attr.address = addrStr;
+    }
   }
   return attr;
 }
@@ -977,7 +1053,11 @@ inline void dispatchMediaAttribute(
   }
   else if (name == AttributeConstants::kRtcp)
   {
-    media.rtcp = parseRtcp(value);
+    // An unusable a=rtcp is left unset rather than stored as port 0.
+    if (auto rtcp = parseRtcp(value))
+    {
+      media.rtcp = std::move(rtcp);
+    }
   }
   else if (name == AttributeConstants::kPtime)
   {
@@ -1276,8 +1356,36 @@ inline ParseResult<SessionDescription> doParse(
       switch (type)
       {
         case 'c':
-          media.connection = parseConnection(val);
+        {
+          // Parse BEFORE the duplicate check: a malformed second c= replaces
+          // nothing, so reporting it as a duplicate would name the wrong cause.
+          auto conn = parseConnection(val);
+          if (!conn)
+          {
+            if (options.strict)
+            {
+              result.value.reset();
+              result.error = ParseError{lineNum, "Malformed c= line"};
+              return result;
+            }
+            // Leave the media-level c= unset (unless an earlier valid one is
+            // held) so the session-level c= can fold down.
+            result.warnings.push_back({lineNum, "Malformed c= line, skipping"});
+            break;
+          }
+          // §5.7 permits repeated MEDIA-level c= lines for layered multicast, so
+          // this is legal SDP that the one-c=-per-level model cannot represent.
+          // Warn in both modes rather than rejecting a conformant description.
+          if (media.connection.has_value())
+          {
+            result.warnings.push_back(
+              {lineNum, "Multiple media-level c= lines (layered multicast, "
+                        "RFC 4566 5.7) are not representable; keeping the first"});
+            break;
+          }
+          media.connection = std::move(conn);
           break;
+        }
         case 'b':
           if (auto bw = parseBandwidth(val))
           {
@@ -1354,8 +1462,57 @@ inline ParseResult<SessionDescription> doParse(
           session.phoneNumber = std::string(val);
           break;
         case 'c':
-          session.connection = parseConnection(val);
+        {
+          auto conn = parseConnection(val);
+          if (!conn)
+          {
+            if (options.strict)
+            {
+              result.value.reset();
+              result.error = ParseError{lineNum, "Malformed c= line"};
+              return result;
+            }
+            result.warnings.push_back({lineNum, "Malformed c= line, skipping"});
+            break;
+          }
+          // §5.7 forbids MULTIPLE ADDRESSES at session level as well as multiple
+          // c= lines: "Multiple addresses or 'c=' lines MAY be specified on a
+          // per-media basis only if they provide multicast addresses for
+          // different layers ... They MUST NOT be specified for a session-level
+          // 'c=' field." A <count> slash group IS multiple addresses. (A bare
+          // <base>/<ttl> stays legal — RFC 4566 §5's own example uses it.)
+          if (conn->numberOfAddresses.has_value())
+          {
+            if (options.strict)
+            {
+              result.value.reset();
+              result.error = ParseError{
+                lineNum, "Session-level c= with multiple addresses "
+                         "(RFC 4566 5.7 MUST NOT)"};
+              return result;
+            }
+            result.warnings.push_back(
+              {lineNum, "Session-level c= with multiple addresses is forbidden "
+                        "(RFC 4566 5.7); dropping the address count"});
+            conn->numberOfAddresses.reset();
+          }
+          // §5.7: multiple c= lines "MUST NOT be specified for a session-level
+          // 'c=' field" — unlike the media level, this one really is illegal.
+          if (session.connection.has_value())
+          {
+            if (options.strict)
+            {
+              result.value.reset();
+              result.error = ParseError{lineNum, "Duplicate session-level c= line"};
+              return result;
+            }
+            result.warnings.push_back(
+              {lineNum, "Duplicate session-level c= line, keeping the first"});
+            break;
+          }
+          session.connection = std::move(conn);
           break;
+        }
         case 'b':
           if (auto bw = parseBandwidth(val))
           {
@@ -1478,6 +1635,9 @@ struct SdpParser
   }
 
   /// Parse a single media section (m= line and subsequent lines).
+  ///
+  /// Always lenient: malformed lines are reported as warnings, never as errors.
+  /// There is no strict mode for a standalone media section.
   static ParseResult<MediaDescription> parseMediaSection(std::string_view text)
   {
     ParseResult<MediaDescription> result;
@@ -1513,8 +1673,23 @@ struct SdpParser
       switch (type)
       {
         case 'c':
-          media.connection = detail::parseConnection(val);
+        {
+          auto conn = detail::parseConnection(val);
+          if (!conn)
+          {
+            result.warnings.push_back({i + 1, "Malformed c= line, skipping"});
+            break;
+          }
+          if (media.connection.has_value())
+          {
+            result.warnings.push_back(
+              {i + 1, "Multiple media-level c= lines (layered multicast, "
+                      "RFC 4566 5.7) are not representable; keeping the first"});
+            break;
+          }
+          media.connection = std::move(conn);
           break;
+        }
         case 'b':
           if (auto bw = detail::parseBandwidth(val))
           {

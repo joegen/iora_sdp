@@ -1861,3 +1861,33 @@ TEST_CASE("createOffer default setup is ACTPASS", "[offer_answer][offer][edge]")
   REQUIRE(offer.setup.has_value());
   REQUIRE(offer.setup.value() == SetupRole::ACTPASS);
 }
+
+TEST_CASE("OfferAnswer: createOffer and createAnswer set no c= at either level",
+          "[offer_answer][connection]")
+{
+  // Pins the documented scaffold contract (offer_answer.hpp): the connection
+  // address is the caller's to supply, so the result is incomplete per RFC 4566
+  // §5.7 until assigned. A change that added a default c= would silently
+  // falsify the doc comment and change what effectiveConnection returns.
+  SECTION("createOffer")
+  {
+    auto offer = OfferAnswer::createOffer();
+    REQUIRE(!offer.connection.has_value());
+    for (std::size_t i = 0; i < offer.mediaDescriptions.size(); ++i)
+    {
+      REQUIRE(!offer.mediaDescriptions[i].connection.has_value());
+      REQUIRE(!offer.effectiveConnection(i).has_value());
+    }
+  }
+
+  SECTION("createAnswer")
+  {
+    auto offer = OfferAnswer::createOffer();
+    auto answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(!answer.connection.has_value());
+    for (std::size_t i = 0; i < answer.mediaDescriptions.size(); ++i)
+    {
+      REQUIRE(!answer.mediaDescriptions[i].connection.has_value());
+    }
+  }
+}
