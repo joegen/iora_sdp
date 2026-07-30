@@ -33,3 +33,6 @@ agent_tasks/
 # OS
 .DS_Store
 Thumbs.db
+
+# CMake install-prefix build output
+/build_install/
