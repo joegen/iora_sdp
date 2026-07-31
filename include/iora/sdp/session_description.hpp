@@ -159,7 +159,12 @@ struct MediaDescription
   std::vector<BandwidthInfo> bandwidths;
   std::optional<std::string> encryptionKey; ///< k= line (deprecated)
   std::optional<std::string> mid;      ///< a=mid (RFC 5888)
-  Direction direction = Direction::SENDRECV;
+  /// Media-level direction (a=sendrecv/sendonly/recvonly/inactive). Absent means
+  /// no media-level direction line was present — the session-level value applies,
+  /// or the RFC 3264 §6.1 / RFC 4566 §6 default of sendrecv. Distinguishing
+  /// absent from an explicit a=sendrecv is required for session-level fold-down;
+  /// resolve the effective value with SessionDescription::effectiveDirection().
+  std::optional<Direction> direction;
   std::vector<RtpMapAttribute> rtpMaps;
   std::vector<FmtpAttribute> fmtps;
   std::vector<RtcpFbAttribute> rtcpFeedbacks;
@@ -248,6 +253,11 @@ struct SessionDescription
   std::optional<std::string> emailAddress; ///< e= line
   std::optional<std::string> phoneNumber;  ///< p= line
   std::optional<ConnectionData> connection; ///< Session-level c= line
+  /// Session-level direction (a=sendrecv/sendonly/recvonly/inactive). Absent
+  /// means no session-level direction line was present. Applies to every media
+  /// section that omits its own direction (RFC 4566 §5/§6); resolve the effective
+  /// per-media value with effectiveDirection().
+  std::optional<Direction> direction;
   std::vector<BandwidthInfo> bandwidths;
   std::vector<TimeDescription> timeDescriptions;
   std::vector<ZoneAdjustment> zoneAdjustments;
@@ -332,6 +342,51 @@ struct SessionDescription
     return connection;
   }
 
+  /// Resolves the effective direction for one media section (RFC 4566 §5/§6):
+  /// a media-level direction attribute overrides the session-level one, and a
+  /// session-level direction applies to every media section that omits its own.
+  /// When neither level carries a direction attribute the RFC 3264 §6.1 /
+  /// RFC 4566 §6 default of sendrecv is applied HERE, so no caller re-homes it.
+  ///
+  /// @param mediaIndex Index into @ref mediaDescriptions.
+  /// @return For an in-range index, always a concrete Direction: the media-level
+  ///         value if present, else the session-level value if present, else
+  ///         Direction::SENDRECV. `std::nullopt` iff @p mediaIndex is OUT OF
+  ///         RANGE — nothing else.
+  ///
+  /// @note The `std::nullopt` here is NARROWER than effectiveConnection's: c= is
+  ///   mandatory, so its absence at both levels is malformed and yields nullopt;
+  ///   direction has an RFC-defined default, so its absence is never malformed
+  ///   and never yields nullopt for an in-range index. The full RFC prose is in
+  ///   docs/programmers_manual.md, "effectiveDirection".
+  ///
+  /// @note A port-0 (rejected) section still has its direction folded here; this
+  ///   resolver is direction-only and port-agnostic. Rejection dominates for
+  ///   hold classification — that precedence belongs to the consumer / the
+  ///   offer/answer answer path, not this resolver.
+  ///
+  /// The call is total: an out-of-range index yields `std::nullopt` and no
+  /// exception is thrown.
+  std::optional<Direction> effectiveDirection(std::size_t mediaIndex) const
+  {
+    if (mediaIndex >= mediaDescriptions.size())
+    {
+      return std::nullopt;
+    }
+
+    const std::optional<Direction>& mediaLevel =
+      mediaDescriptions[mediaIndex].direction;
+    if (mediaLevel.has_value())
+    {
+      return mediaLevel;
+    }
+    if (direction.has_value())
+    {
+      return direction;
+    }
+    return Direction::SENDRECV;
+  }
+
   bool operator==(const SessionDescription& other) const noexcept
   {
     return version == other.version
@@ -342,6 +397,7 @@ struct SessionDescription
         && emailAddress == other.emailAddress
         && phoneNumber == other.phoneNumber
         && connection == other.connection
+        && direction == other.direction
         && bandwidths == other.bandwidths
         && timeDescriptions == other.timeDescriptions
         && zoneAdjustments == other.zoneAdjustments

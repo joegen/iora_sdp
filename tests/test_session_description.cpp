@@ -206,7 +206,9 @@ TEST_CASE("MediaDescription: default construction", "[session][MediaDescription]
   REQUIRE(md.bandwidths.empty());
   REQUIRE(!md.encryptionKey.has_value());
   REQUIRE(!md.mid.has_value());
-  REQUIRE(md.direction == Direction::SENDRECV);
+  // A default-constructed media section carries NO direction line; the effective
+  // direction (session/default sendrecv) is resolved via effectiveDirection().
+  REQUIRE(!md.direction.has_value());
   REQUIRE(md.rtpMaps.empty());
   REQUIRE(md.fmtps.empty());
   REQUIRE(md.rtcpFeedbacks.empty());

@@ -283,19 +283,22 @@ TEST_CASE("Parser: unknown session-level attributes stored as GenericAttribute",
   REQUIRE(result.value->attributes[1].value == "iora-sdp");
 }
 
-TEST_CASE("Parser: direction attributes at session level stored as GenericAttribute", "[parser]")
+TEST_CASE("Parser: session-level direction captured as typed field, not GenericAttribute", "[parser][direction]")
 {
   std::string sdp =
     "v=0\r\n"
     "o=- 0 0 IN IP4 0.0.0.0\r\n"
     "s=-\r\n"
     "t=0 0\r\n"
-    "a=sendrecv\r\n";
+    "a=sendonly\r\n";
 
   auto result = SdpParser::parse(sdp);
   REQUIRE(result.hasValue());
-  REQUIRE(result.value->attributes.size() == 1);
-  REQUIRE(result.value->attributes[0].name == "sendrecv");
+  // A session-level direction lands in the typed session.direction field and is
+  // NOT double-stored as a GenericAttribute (RFC 4566 §5/§6 fold-down source).
+  REQUIRE(result.value->direction.has_value());
+  REQUIRE(*result.value->direction == Direction::SENDONLY);
+  REQUIRE(result.value->attributes.empty());
 }
 
 // =========================================================================
@@ -1780,7 +1783,10 @@ TEST_CASE("Parser: default direction is sendrecv when no direction attribute pre
 
   auto result = SdpParser::parse(sdp);
   REQUIRE(result.hasValue());
-  REQUIRE(result.value->mediaDescriptions[0].direction == Direction::SENDRECV);
+  // No a= direction line -> the raw media-level field is absent, and the
+  // effective direction defaults to sendrecv (RFC 3264 §6.1 / RFC 4566 §6).
+  REQUIRE(!result.value->mediaDescriptions[0].direction.has_value());
+  REQUIRE(result.value->effectiveDirection(0) == Direction::SENDRECV);
 }
 
 TEST_CASE("Parser: a=ssrc without attributeValue (just attributeName)", "[parser][ssrc]")

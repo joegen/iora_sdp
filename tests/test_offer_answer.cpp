@@ -1818,8 +1818,9 @@ TEST_CASE("createAnswer with offer containing disabled (port=0) media section",
   REQUIRE(answer.mediaDescriptions.size() == 2);
   // Audio should be accepted normally
   REQUIRE(answer.mediaDescriptions[0].port == 9);
-  // Disabled offer video: direction flipped from INACTIVE->INACTIVE, port set to 9
-  // (the implementation does not special-case already-disabled sections)
+  // A port-0 offered section MUST be answered with port 0 (RFC 3264 §8.2) and
+  // marked INACTIVE — the createAnswer declined-section guard (tracker 2026-07-25-3).
+  REQUIRE(answer.mediaDescriptions[1].port == 0);
   REQUIRE(answer.mediaDescriptions[1].direction == Direction::INACTIVE);
 }
 

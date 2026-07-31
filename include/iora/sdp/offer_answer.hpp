@@ -635,16 +635,27 @@ struct OfferAnswer
 
     session.groups = offer.groups;
 
-    for (const auto& offerMedia : offer.mediaDescriptions)
+    // Indexed loop so the offer's effective (session-level-folded) direction can
+    // be resolved per media via offer.effectiveDirection(i).
+    for (std::size_t i = 0; i < offer.mediaDescriptions.size(); ++i)
     {
+      const auto& offerMedia = offer.mediaDescriptions[i];
       MediaDescription answerMedia;
 
-      bool rejected = std::find(answerOptions.rejectMediaTypes.begin(),
-                                 answerOptions.rejectMediaTypes.end(),
-                                 offerMedia.mediaType)
-                      != answerOptions.rejectMediaTypes.end();
+      // A section is DECLINED when offered with port 0 (RFC 3264 §6/§8.2 — the
+      // answer MUST also be port 0) or when its media type is locally rejected.
+      // The port-0 test is first so it short-circuits the reject-list search.
+      // A declined answer echoes the offer's media/proto and keeps >=1 format
+      // token (RFC 4566 m= grammar), is marked INACTIVE, and dominates any
+      // inherited session-level direction.
+      const bool declined =
+        isMediaDisabled(offerMedia)
+        || std::find(answerOptions.rejectMediaTypes.begin(),
+                     answerOptions.rejectMediaTypes.end(),
+                     offerMedia.mediaType)
+             != answerOptions.rejectMediaTypes.end();
 
-      if (rejected)
+      if (declined)
       {
         answerMedia.mediaType = offerMedia.mediaType;
         answerMedia.port = 0;
@@ -670,7 +681,11 @@ struct OfferAnswer
         answerMedia.mediaType = offerMedia.mediaType;
         answerMedia.port = 9;
         answerMedia.protocol = offerMedia.protocol;
-        answerMedia.direction = flipDirection(offerMedia.direction);
+        // Answer the offer's EFFECTIVE direction (session-level folded down per
+        // RFC 4566 §5/§6), not the raw media-level field which is nullopt when
+        // only a session-level direction was present. In-range index → Option B
+        // guarantees a concrete value, so the deref is safe (RFC 3264 §6.1).
+        answerMedia.direction = flipDirection(*offer.effectiveDirection(i));
         answerMedia.mid = offerMedia.mid;
         answerMedia.rtcpMux = offerMedia.rtcpMux;
 

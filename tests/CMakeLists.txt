@@ -28,6 +28,7 @@ add_executable(sdp_tests
   test_offer_answer.cpp
   test_round_trip.cpp
   test_webrtc_sdp.cpp
+  test_effective_direction.cpp
 )
 
 target_link_libraries(sdp_tests PRIVATE

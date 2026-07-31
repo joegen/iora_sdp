@@ -450,9 +450,16 @@ inline std::string serializeSessionLevel(
   }
 
   // Session-level a= attributes in conventional order:
-  // ice-ufrag, ice-pwd, ice-options, ice-lite, fingerprint, setup,
+  // direction, ice-ufrag, ice-pwd, ice-options, ice-lite, fingerprint, setup,
   // extmap-allow-mixed, group, generic
 
+  // Session-level direction (RFC 4566 §5/§6): emitted only when present, at
+  // session scope (after t=, before the first m=). Absent means no session-level
+  // direction line — never fabricate one.
+  if (session.direction.has_value())
+  {
+    result += "a=" + std::string(toString(*session.direction)) + le;
+  }
   if (session.iceUfrag.has_value())
   {
     result += "a=ice-ufrag:" + *session.iceUfrag + le;
@@ -539,8 +546,13 @@ inline std::string serializeMediaLevel(
 
   // Media-level a= attributes in conventional order
 
-  // 1. direction
-  result += "a=" + std::string(toString(media.direction)) + le;
+  // 1. direction — emitted only when a media-level direction line was present;
+  //    absent means inherit the session-level value / default, so do NOT
+  //    fabricate a=sendrecv (RFC 4566 §5/§6).
+  if (media.direction.has_value())
+  {
+    result += "a=" + std::string(toString(*media.direction)) + le;
+  }
 
   // 2. mid
   if (media.mid.has_value())

@@ -1009,6 +1009,22 @@ inline void dispatchSessionAttribute(
   {
     session.extmapAllowMixed = true;
   }
+  else if (auto dir = directionFromString(name))
+  {
+    // Session-level direction (RFC 4566 §5/§6). Captured as a typed field, not
+    // a GenericAttribute, so effectiveDirection() can fold it down and the
+    // serializer emits it exactly once at session scope (no double-store).
+    if (session.direction.has_value() && strict)
+    {
+      error = ParseError{lineNum, "Duplicate session-level direction attribute"};
+      return;
+    }
+    if (session.direction.has_value())
+    {
+      warnings.push_back({lineNum, "Duplicate session-level direction attribute, overwriting"});
+    }
+    session.direction = *dir;
+  }
   else
   {
     GenericAttribute ga;
@@ -1172,21 +1188,21 @@ inline void dispatchMediaAttribute(
   {
     media.extmapAllowMixed = true;
   }
-  else if (name == AttributeConstants::kSendrecv)
+  else if (auto dir = directionFromString(name))
   {
-    media.direction = Direction::SENDRECV;
-  }
-  else if (name == AttributeConstants::kSendonly)
-  {
-    media.direction = Direction::SENDONLY;
-  }
-  else if (name == AttributeConstants::kRecvonly)
-  {
-    media.direction = Direction::RECVONLY;
-  }
-  else if (name == AttributeConstants::kInactive)
-  {
-    media.direction = Direction::INACTIVE;
+    // Media-level direction (RFC 4566 §6). Uses the same case-insensitive helper
+    // as the session-level branch so both levels resolve identically. Duplicate
+    // handling mirrors the media-level a=setup/ice-ufrag pattern.
+    if (media.direction.has_value() && strict)
+    {
+      error = ParseError{lineNum, "Duplicate media-level direction attribute"};
+      return;
+    }
+    if (media.direction.has_value())
+    {
+      warnings.push_back({lineNum, "Duplicate media-level direction attribute, overwriting"});
+    }
+    media.direction = *dir;
   }
   else if (name == AttributeConstants::kSctpPort)
   {
