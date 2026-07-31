@@ -286,14 +286,20 @@ std::optional<AddressType> addressTypeFromString(std::string_view s);
 ```cpp
 enum class Direction
 {
-  SENDRECV,  // bidirectional (default per RFC 3264 section 6.1)
+  SENDRECV,  // bidirectional (default per RFC 3264 §5.1)
   SENDONLY,  // send only
   RECVONLY,  // receive only
   INACTIVE   // no media flow
 };
 ```
 
-**Important:** The default direction is `SENDRECV` if no direction attribute is present in the SDP.
+**Important:** `MediaDescription::direction` and `SessionDescription::direction` are
+`std::optional<Direction>`. Absent means no direction line was present at that level — this is
+deliberately distinct from an explicit `a=sendrecv`, so a session-level direction can be folded
+down to media that omit their own. Do not read the raw field to decide hold; resolve the effective
+value with `SessionDescription::effectiveDirection(mediaIndex)`, which applies the RFC 3264 §5.1
+(restated for the media-or-session-level case in §6.1) / RFC 4566 §6 default of `SENDRECV` when
+neither level carries a direction attribute.
 
 **Free functions:**
 
@@ -993,7 +999,7 @@ struct MediaDescription
 
   // Identification and direction
   std::optional<std::string> mid;                            // a=mid (RFC 5888)
-  Direction direction = Direction::SENDRECV;
+  std::optional<Direction> direction;                        // media-level a=; absent = inherit/default
 
   // Codec attributes
   std::vector<RtpMapAttribute> rtpMaps;                      // a=rtpmap lines
@@ -1107,14 +1113,17 @@ struct SessionDescription
   bool iceLite = false;                                        // a=ice-lite
   std::vector<FingerprintAttribute> fingerprints;              // session-level fingerprint
   std::optional<SetupRole> setup;                              // session-level setup
+  std::optional<Direction> direction;                          // session-level a= direction
   bool extmapAllowMixed = false;                               // a=extmap-allow-mixed (RFC 8285)
 
   // Media sections
   std::vector<MediaDescription> mediaDescriptions;             // ordered list of m= blocks
 
-  // RFC 4566 §5.7 connection fold-down
+  // RFC 4566 §5.7 connection fold-down and §5/§6 direction fold-down
   std::optional<ConnectionData>
     effectiveConnection(std::size_t mediaIndex) const;
+  std::optional<Direction>
+    effectiveDirection(std::size_t mediaIndex) const;
 };
 ```
 
@@ -1133,8 +1142,10 @@ session.timeDescriptions.push_back({0, 0, {}});
 ```
 
 **Session-level attribute inheritance:** Session-level ICE credentials (`iceUfrag`, `icePwd`),
-fingerprints, and setup role apply to all media sections that do not override them at the media level.
-The same is true of the connection address (`c=`), which has a dedicated resolver.
+fingerprints, setup role, and **direction** (`a=sendrecv`/`sendonly`/`recvonly`/`inactive`) apply to
+all media sections that do not override them at the media level. The connection address (`c=`) and the
+direction each have a dedicated resolver — `effectiveConnection` and `effectiveDirection` — that
+implement the two halves of the single RFC 4566 §5 inheritance rule.
 
 **`effectiveConnection(mediaIndex)` — RFC 4566 §5.7 fold-down:** resolves the connection data that
 actually applies to one media section: the media-level `c=` when the index is in range and carries
@@ -1159,6 +1170,41 @@ if (result.hasValue())
 | Address usability | A *present* `ConnectionData` may still carry an empty or ill-formed `address` — the resolver returns model state faithfully and validates nothing. Reject an unusable address exactly as you would `nullopt`; `has_value()` alone is not the check. |
 | Value fidelity | The whole `ConnectionData` is returned verbatim — multicast `ttl`/`numberOfAddresses`, IPv6, FQDNs, and the `0.0.0.0` / `::` sentinels are never inspected, normalised, or collapsed to `nullopt`. |
 | Direction | Inbound only: it folds down a *received* description. An outbound description takes its address from the local session identity. |
+
+**`effectiveDirection(mediaIndex)` — RFC 4566 §5/§6 direction fold-down:** the `a=` half of the same
+inheritance rule. It resolves the direction that actually applies to one media section: the media-level
+direction when present, otherwise the session-level direction, otherwise `SENDRECV`.
+
+```cpp
+auto result = SdpParser::parse(offer);
+if (result.hasValue() && !result.value->mediaDescriptions.empty())
+{
+  // An in-range index always yields a concrete Direction (default SENDRECV);
+  // guard the index before treating a result as authoritative.
+  if (auto dir = result.value->effectiveDirection(0))
+  {
+    // Received sendonly/inactive means the peer is holding OUR stream.
+    bool weAreHeld = (*dir == Direction::SENDONLY || *dir == Direction::INACTIVE);
+  }
+}
+```
+
+| Behaviour | Rule |
+|---|---|
+| Precedence | Media-level direction overrides session-level; a session-level direction applies to every media section that omits its own (RFC 4566 §5/§6). |
+| Default | When neither level carries a direction attribute the default of `SENDRECV` (RFC 3264 §5.1, restated for the media-or-session-level case in §6.1; RFC 4566 §6) is applied **inside** the resolver, so no caller re-homes it. |
+| `nullopt` meaning | **Out-of-range index ONLY.** This is narrower than `effectiveConnection`'s `nullopt`: `c=` is mandatory, so its absence at both levels is *malformed*; direction has an RFC-defined default, so its absence is never malformed and an in-range index always yields a concrete `Direction`. |
+| Port-0 sections | The direction is still folded onto a rejected (port-0) section — the resolver is direction-only and port-agnostic. Rejection dominates for hold classification, but that precedence belongs to the consumer / the offer-answer answer path, not this resolver. |
+| Never throws | Bounds-checked before indexing; total. |
+
+**Hold detection** combines both resolvers, but only the direction is authoritative on its own. A
+stream is held when `effectiveDirection` is `sendonly` or `inactive` (the RFC 3264 §8.4 modern form,
+by far the more common on the wire) — including a live (non-zero) `c=` with a session-level
+`a=inactive`. An unspecified `effectiveConnection` address (`0.0.0.0`/`::`) is **not**, by itself, a
+hold signal: as the next section details, the same address also appears in a port-late initial offer
+(non-zero port) and a trickle-ICE placeholder. Treat it as the RFC 2543 legacy hold form **only** in a
+mid-session offer with a non-zero port and no ICE attributes. Port 0 is stream *rejection* (RFC 3264
+§6/§8.2), not hold.
 
 **An unspecified address cannot be classified from the address alone.** `0.0.0.0` and `::` have
 three distinct producers, and nothing in the address distinguishes them:
@@ -1598,9 +1644,14 @@ v=, o=, s=, i=, u=, e=, p=, c=, b=, t= (with r=), z=, k=
 Then session-level `a=` attributes in conventional order:
 
 ```
-ice-ufrag, ice-pwd, ice-options, ice-lite, fingerprint, setup,
+direction, ice-ufrag, ice-pwd, ice-options, ice-lite, fingerprint, setup,
 extmap-allow-mixed, group, generic
 ```
+
+The session-level `direction` line is emitted only when `SessionDescription::direction` is present,
+after `t=` and before the first `m=` (RFC 4566 §5). A media-level `direction` line is likewise emitted
+only when `MediaDescription::direction` is present — an absent media direction no longer fabricates an
+`a=sendrecv` line on the wire.
 
 **Media-level field order:**
 
@@ -2329,7 +2380,7 @@ REQUIRE(*r1.value == *r2.value);  // data model equivalence
 **Faithfully round-trips:**
 
 - All typed attributes (rtpmap, fmtp, rtcp-fb, extmap, ssrc, ssrc-group, candidate, fingerprint, crypto, msid, group, simulcast, rid)
-- All enum values (direction, setup role, media type, transport protocol)
+- All enum values (direction, setup role, media type, transport protocol). A session-level direction is preserved at session scope, and an absent media-level direction is NOT fabricated as `a=sendrecv` on output (RFC 4566 §5/§6 fold-down).
 - Unknown/generic attributes (via `GenericAttribute`)
 - ICE candidates with all extensions
 
@@ -2608,9 +2659,9 @@ coverage.
 
 | RFC | Title | Coverage |
 |-----|-------|----------|
-| RFC 4566 | SDP: Session Description Protocol | Parsing/serialization of all session and media fields, with the documented exceptions in §9 "Does NOT round-trip" and the §4 `c=` model limitation (no media-level `i=`; no repeated media-level `c=`; only `IN` / `IP4`,`IP6` accepted) |
+| RFC 4566 | SDP: Session Description Protocol | Parsing/serialization of all session and media fields; §5/§6 session-level direction inheritance & fold-down (`effectiveDirection`) and §5.7 `c=` fold-down (`effectiveConnection`); with the documented exceptions in §9 "Does NOT round-trip" and the §4 `c=` model limitation (no media-level `i=`; no repeated media-level `c=`; only `IN` / `IP4`,`IP6` accepted) |
 | RFC 8866 | SDP: Session Description Protocol (obsoletes 4566) | Same wire format, deprecates `k=` |
-| RFC 3264 | An Offer/Answer Model with SDP | Direction semantics, offer/answer utilities |
+| RFC 3264 | An Offer/Answer Model with SDP | Direction semantics: §5.1 `sendrecv` default, §6.1 answer direction flip; §6/§8.2 port-0 rejected-stream answers; offer/answer utilities |
 | RFC 3551 | RTP Profile for Audio and Video Conferences | rtpmap encoding names, clock rates |
 
 ### ICE RFCs
@@ -2718,6 +2769,7 @@ coverage.
 | Type | Method | Signature | Purpose |
 |------|--------|-----------|---------|
 | `SessionDescription` | `effectiveConnection` | `std::optional<ConnectionData> effectiveConnection(std::size_t mediaIndex) const` | RFC 4566 §5.7 `c=` fold-down: media-level overrides session-level; `nullopt` when out of range or when neither level carries a `c=` |
+| `SessionDescription` | `effectiveDirection` | `std::optional<Direction> effectiveDirection(std::size_t mediaIndex) const` | RFC 4566 §5/§6 direction fold-down: media-level overrides session-level, else `SENDRECV`; `nullopt` **only** when out of range |
 
 ### Structs -- Parser/Serializer
 

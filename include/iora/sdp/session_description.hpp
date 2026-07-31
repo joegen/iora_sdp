@@ -161,7 +161,7 @@ struct MediaDescription
   std::optional<std::string> mid;      ///< a=mid (RFC 5888)
   /// Media-level direction (a=sendrecv/sendonly/recvonly/inactive). Absent means
   /// no media-level direction line was present — the session-level value applies,
-  /// or the RFC 3264 §6.1 / RFC 4566 §6 default of sendrecv. Distinguishing
+  /// or the RFC 3264 §5.1 / RFC 4566 §6 default of sendrecv. Distinguishing
   /// absent from an explicit a=sendrecv is required for session-level fold-down;
   /// resolve the effective value with SessionDescription::effectiveDirection().
   std::optional<Direction> direction;
@@ -345,8 +345,9 @@ struct SessionDescription
   /// Resolves the effective direction for one media section (RFC 4566 §5/§6):
   /// a media-level direction attribute overrides the session-level one, and a
   /// session-level direction applies to every media section that omits its own.
-  /// When neither level carries a direction attribute the RFC 3264 §6.1 /
-  /// RFC 4566 §6 default of sendrecv is applied HERE, so no caller re-homes it.
+  /// When neither level carries a direction attribute the RFC 3264 §5.1 (restated
+  /// for the media-or-session-level case in §6.1) / RFC 4566 §6 default of sendrecv
+  /// is applied HERE, so no caller re-homes it.
   ///
   /// @param mediaIndex Index into @ref mediaDescriptions.
   /// @return For an in-range index, always a concrete Direction: the media-level
