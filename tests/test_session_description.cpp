@@ -197,10 +197,14 @@ TEST_CASE("TimeDescription: equality", "[session][TimeDescription]")
 TEST_CASE("MediaDescription: default construction", "[session][MediaDescription]")
 {
   MediaDescription md;
-  REQUIRE(md.mediaType == MediaType::AUDIO);
+  // Defaults are the fail-safe UNKNOWN sentinel, not a silent AUDIO/RTP_AVP: a
+  // default-constructed section must never masquerade as recognized audio/RTP.
+  REQUIRE(md.mediaType == MediaType::UNKNOWN);
   REQUIRE(md.port == 0);
   REQUIRE(!md.numberOfPorts.has_value());
-  REQUIRE(md.protocol == TransportProtocol::RTP_AVP);
+  REQUIRE(md.protocol == TransportProtocol::UNKNOWN);
+  REQUIRE(md.rawMediaType.empty());
+  REQUIRE(md.rawProtocol.empty());
   REQUIRE(md.formats.empty());
   REQUIRE(!md.connection.has_value());
   REQUIRE(md.bandwidths.empty());

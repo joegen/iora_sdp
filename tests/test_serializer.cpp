@@ -348,6 +348,8 @@ TEST_CASE("Serializer: Multiple FingerprintAttribute at session and media level"
   session.fingerprints.push_back({"sha-256", "AA:BB:CC"});
   session.fingerprints.push_back({"sha-1", "DD:EE:FF"});
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"0"};
   media.fingerprints.push_back({"sha-256", "11:22:33"});
   media.fingerprints.push_back({"sha-384", "44:55:66"});
@@ -376,6 +378,8 @@ TEST_CASE("Serializer: Media without numberOfPorts", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.port = 5004;
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -388,6 +392,8 @@ TEST_CASE("Serializer: Media with numberOfPorts", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.port = 5004;
   media.numberOfPorts = 2;
   media.formats = {"0"};
@@ -403,6 +409,8 @@ TEST_CASE("Serializer: Direction attribute serialized", "[serializer]")
   SECTION("sendrecv")
   {
     MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.protocol = TransportProtocol::RTP_AVP;
     m.direction = Direction::SENDRECV;
     session.mediaDescriptions.push_back(m);
     auto sdp = SdpSerializer::serialize(session);
@@ -411,6 +419,8 @@ TEST_CASE("Serializer: Direction attribute serialized", "[serializer]")
   SECTION("sendonly")
   {
     MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.protocol = TransportProtocol::RTP_AVP;
     m.direction = Direction::SENDONLY;
     session.mediaDescriptions.push_back(m);
     auto sdp = SdpSerializer::serialize(session);
@@ -419,6 +429,8 @@ TEST_CASE("Serializer: Direction attribute serialized", "[serializer]")
   SECTION("recvonly")
   {
     MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.protocol = TransportProtocol::RTP_AVP;
     m.direction = Direction::RECVONLY;
     session.mediaDescriptions.push_back(m);
     auto sdp = SdpSerializer::serialize(session);
@@ -427,6 +439,8 @@ TEST_CASE("Serializer: Direction attribute serialized", "[serializer]")
   SECTION("inactive")
   {
     MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.protocol = TransportProtocol::RTP_AVP;
     m.direction = Direction::INACTIVE;
     session.mediaDescriptions.push_back(m);
     auto sdp = SdpSerializer::serialize(session);
@@ -438,6 +452,8 @@ TEST_CASE("Serializer: mid, msid, ice-ufrag, ice-pwd, ice-options at media level
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.mid = "0";
   media.msid.push_back({"stream1", std::string("track1")});
   media.iceUfrag = "uf1";
@@ -456,6 +472,8 @@ TEST_CASE("Serializer: msid without trackId", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.msid.push_back({"stream1", std::nullopt});
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -466,6 +484,8 @@ TEST_CASE("Serializer: Flag attributes", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.rtcpMux = true;
   media.rtcpMuxOnly = true;
   media.rtcpRsize = true;
@@ -486,6 +506,8 @@ TEST_CASE("Serializer: rtpmap with channels", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"111"};
   RtpMapAttribute rm;
   rm.payloadType = 111;
@@ -502,6 +524,8 @@ TEST_CASE("Serializer: rtpmap without channels", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"96"};
   RtpMapAttribute rm;
   rm.payloadType = 96;
@@ -517,6 +541,8 @@ TEST_CASE("Serializer: fmtp raw parameters preserved", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"111"};
   RtpMapAttribute rm;
   rm.payloadType = 111;
@@ -536,6 +562,8 @@ TEST_CASE("Serializer: rtcp-fb with and without subtype", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"111"};
   RtpMapAttribute rm;
   rm.payloadType = 111;
@@ -554,6 +582,8 @@ TEST_CASE("Serializer: rtcp-fb wildcard payload type", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.rtcpFeedbacks.push_back({"*", "transport-cc", std::nullopt});
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -564,6 +594,8 @@ TEST_CASE("Serializer: extmap with direction", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   ExtMapAttribute em;
   em.id = 1;
   em.direction = Direction::SENDONLY;
@@ -578,6 +610,8 @@ TEST_CASE("Serializer: extmap without direction", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   ExtMapAttribute em;
   em.id = 1;
   em.uri = "urn:ietf:params:rtp-hdrext:ssrc-audio-level";
@@ -591,6 +625,8 @@ TEST_CASE("Serializer: extmap with extensionAttributes", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   ExtMapAttribute em;
   em.id = 2;
   em.uri = "urn:example";
@@ -605,6 +641,8 @@ TEST_CASE("Serializer: ssrc with and without attributeValue", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.ssrcs.push_back({3735928559, "cname", std::string("user@host")});
   media.ssrcs.push_back({3735928559, "label", std::nullopt});
   session.mediaDescriptions.push_back(media);
@@ -617,6 +655,8 @@ TEST_CASE("Serializer: ssrc-group", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   SsrcGroupAttribute sg;
   sg.semantics = "FID";
   sg.ssrcs = {12345, 67890};
@@ -630,6 +670,8 @@ TEST_CASE("Serializer: rtcp port only", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   RtcpAttribute rtcp;
   rtcp.port = 9;
   media.rtcp = rtcp;
@@ -642,6 +684,8 @@ TEST_CASE("Serializer: rtcp full form", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   RtcpAttribute rtcp;
   rtcp.port = 53020;
   rtcp.netType = NetworkType::IN;
@@ -657,6 +701,8 @@ TEST_CASE("Serializer: ICE candidate host", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   IceCandidate cand;
   cand.foundation = "1";
   cand.component = 1;
@@ -675,6 +721,8 @@ TEST_CASE("Serializer: ICE candidate srflx with raddr/rport", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   IceCandidate cand;
   cand.foundation = "2";
   cand.component = 1;
@@ -695,6 +743,8 @@ TEST_CASE("Serializer: ICE candidate relay with raddr/rport", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   IceCandidate cand;
   cand.foundation = "3";
   cand.component = 1;
@@ -715,6 +765,8 @@ TEST_CASE("Serializer: ICE candidate TCP with tcptype", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   IceCandidate cand;
   cand.foundation = "4";
   cand.component = 1;
@@ -734,6 +786,8 @@ TEST_CASE("Serializer: ICE candidate with extension attributes", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   IceCandidate cand;
   cand.foundation = "1";
   cand.component = 1;
@@ -753,6 +807,8 @@ TEST_CASE("Serializer: Fingerprint sha-256 and sha-1", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.fingerprints.push_back({"sha-256", "AA:BB:CC:DD"});
   media.fingerprints.push_back({"sha-1", "EE:FF:00:11"});
   session.mediaDescriptions.push_back(media);
@@ -765,6 +821,8 @@ TEST_CASE("Serializer: Crypto with sessionParams", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   CryptoAttribute crypto;
   crypto.tag = 1;
   crypto.suite = "AES_CM_128_HMAC_SHA1_80";
@@ -780,6 +838,8 @@ TEST_CASE("Serializer: Crypto without sessionParams", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   CryptoAttribute crypto;
   crypto.tag = 1;
   crypto.suite = "AES_CM_128_HMAC_SHA1_80";
@@ -794,6 +854,8 @@ TEST_CASE("Serializer: Simulcast send+recv", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   SimulcastAttribute sc;
   sc.sendStreams = {{{"h", false}, {"m", false}}, {{"l", false}}};
   sc.recvStreams = {{{"h", false}}};
@@ -807,6 +869,8 @@ TEST_CASE("Serializer: Simulcast send-only", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   SimulcastAttribute sc;
   sc.sendStreams = {{{"h", false}, {"m", false}}};
   media.simulcast = sc;
@@ -819,6 +883,8 @@ TEST_CASE("Serializer: Simulcast recv-only", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   SimulcastAttribute sc;
   sc.recvStreams = {{{"h", false}}, {{"l", false}}};
   media.simulcast = sc;
@@ -831,6 +897,8 @@ TEST_CASE("Serializer: Simulcast with paused streams", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   SimulcastAttribute sc;
   sc.sendStreams = {{{"h", false}, {"m", true}}, {{"l", true}}};
   media.simulcast = sc;
@@ -843,6 +911,8 @@ TEST_CASE("Serializer: Rid with pt=", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   RidAttribute rid;
   rid.id = "h";
   rid.direction = RidDirection::SEND;
@@ -857,6 +927,8 @@ TEST_CASE("Serializer: Rid with restrictions sorted alphabetically", "[serialize
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   RidAttribute rid;
   rid.id = "h";
   rid.direction = RidDirection::SEND;
@@ -873,6 +945,8 @@ TEST_CASE("Serializer: Rid minimal (id direction only)", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   RidAttribute rid;
   rid.id = "l";
   rid.direction = RidDirection::RECV;
@@ -901,6 +975,8 @@ TEST_CASE("Serializer: ptime and maxptime as integers", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.ptime = 20;
   media.maxptime = 60;
   session.mediaDescriptions.push_back(media);
@@ -913,6 +989,8 @@ TEST_CASE("Serializer: framerate integer value", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.framerate = 30.0;
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -923,6 +1001,8 @@ TEST_CASE("Serializer: framerate fractional value", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.framerate = 29.97;
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -937,6 +1017,8 @@ TEST_CASE("Serializer: framerate no trailing zeros", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.framerate = 15.0;
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -948,6 +1030,8 @@ TEST_CASE("Serializer: Generic attributes with value and flag", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.genericAttributes.push_back({"x-custom", std::string("value1")});
   media.genericAttributes.push_back({"x-flag", std::nullopt});
   session.mediaDescriptions.push_back(media);
@@ -960,6 +1044,8 @@ TEST_CASE("Serializer: GenericAttribute with '=' in value", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.genericAttributes.push_back({"foo", std::string("bar=baz")});
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -1021,6 +1107,8 @@ TEST_CASE("Serializer: Format with no rtpmap in m= line", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"111", "8"};
   RtpMapAttribute rm;
   rm.payloadType = 111;
@@ -1040,6 +1128,8 @@ TEST_CASE("Serializer: No empty lines in output", "[serializer]")
   session.iceUfrag = "uf";
   session.icePwd = "pw";
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.mid = "0";
   media.rtcpMux = true;
   session.mediaDescriptions.push_back(media);
@@ -1054,6 +1144,8 @@ TEST_CASE("Serializer: No trailing whitespace on any line", "[serializer]")
   session.icePwd = "pw";
   session.fingerprints.push_back({"sha-256", "AA:BB"});
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.mid = "0";
   media.formats = {"111"};
   RtpMapAttribute rm;
@@ -1113,6 +1205,8 @@ TEST_CASE("Serializer: serializeMediaSection with options (bare LF)", "[serializ
   SdpSerializerOptions opts;
   opts.lineEnding = "\n";
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.port = 9;
   media.formats = {"0"};
   auto sdp = SdpSerializer::serializeMediaSection(media, opts);
@@ -1143,6 +1237,8 @@ TEST_CASE("Serializer: Media-level attribute order", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.direction = Direction::SENDRECV;
   media.mid = "0";
   media.msid.push_back({"stream1", std::string("track1")});
@@ -1519,6 +1615,8 @@ TEST_CASE("Serializer: Numeric fields without leading zeros", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.port = 9;
   media.formats = {"0"};
   RtpMapAttribute rm;
@@ -1537,6 +1635,8 @@ TEST_CASE("Serializer: Wildcard rtcp-fb after per-PT rtcp-fb", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.formats = {"111"};
   RtpMapAttribute rm;
   rm.payloadType = 111;
@@ -1559,6 +1659,8 @@ TEST_CASE("Serializer: Rid with pt= and restrictions", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   RidAttribute rid;
   rid.id = "h";
   rid.direction = RidDirection::SEND;
@@ -1580,6 +1682,8 @@ TEST_CASE("Serializer: Media-level iceOptions with multiple values", "[serialize
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.iceOptions = {"trickle", "ice2"};
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -1590,6 +1694,8 @@ TEST_CASE("Serializer: Empty media-level iceOptions omits line", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
   // Should only have session-level content and media content — no ice-options at media level
@@ -1703,6 +1809,7 @@ TEST_CASE("Serializer: Round-trip ICE candidate with all fields", "[serializer][
   session.timeDescriptions.push_back(td);
 
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
   media.port = 9;
   media.protocol = TransportProtocol::UDP_TLS_RTP_SAVPF;
   media.formats = {"111"};
@@ -1750,6 +1857,7 @@ TEST_CASE("Serializer: Round-trip simulcast", "[serializer][roundtrip]")
   session.timeDescriptions.push_back(td);
 
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
   media.port = 9;
   media.protocol = TransportProtocol::UDP_TLS_RTP_SAVPF;
   media.formats = {"96"};
@@ -1792,6 +1900,8 @@ TEST_CASE("Serializer: Fingerprint and setup serialized", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.fingerprints.push_back({"sha-256", "AA:BB:CC"});
   media.setup = SetupRole::ACTIVE;
   session.mediaDescriptions.push_back(media);
@@ -1804,6 +1914,8 @@ TEST_CASE("Serializer: Media-level connection", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   ConnectionData conn;
   conn.address = "10.0.0.1";
   media.connection = conn;
@@ -1818,6 +1930,8 @@ TEST_CASE("Serializer: Media-level bandwidth", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.bandwidths = {{BandwidthType::TIAS, 500000}};
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -1830,6 +1944,8 @@ TEST_CASE("Serializer: Media-level encryption key", "[serializer]")
 {
   SessionDescription session;
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.encryptionKey = "base64:mediakey";
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
@@ -1842,12 +1958,14 @@ TEST_CASE("Serializer: Multiple media sections", "[serializer]")
 {
   SessionDescription session;
   MediaDescription audio;
+  audio.protocol = TransportProtocol::RTP_AVP;
   audio.mediaType = MediaType::AUDIO;
   audio.port = 9;
   audio.formats = {"111"};
   session.mediaDescriptions.push_back(audio);
 
   MediaDescription video;
+  video.protocol = TransportProtocol::RTP_AVP;
   video.mediaType = MediaType::VIDEO;
   video.port = 9;
   video.formats = {"96"};
@@ -1892,6 +2010,8 @@ TEST_CASE("Serializer: No empty lines with bare LF", "[serializer][edge]")
   session.iceUfrag = "uf";
   session.icePwd = "pw";
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.mid = "0";
   media.rtcpMux = true;
   session.mediaDescriptions.push_back(media);
@@ -1908,6 +2028,8 @@ TEST_CASE("Serializer: No trailing whitespace with bare LF", "[serializer][edge]
   session.icePwd = "pw";
   session.fingerprints.push_back({"sha-256", "AA:BB"});
   MediaDescription media;
+  media.mediaType = MediaType::AUDIO;
+  media.protocol = TransportProtocol::RTP_AVP;
   media.mid = "0";
   media.formats = {"111"};
   RtpMapAttribute rm;
@@ -1977,6 +2099,8 @@ TEST_CASE("Serializer: IPv6 multicast emits the address count without a TTL",
   c.address = "FF15::101";
   c.numberOfAddresses = 3;
   MediaDescription m;
+  m.mediaType = MediaType::AUDIO;
+  m.protocol = TransportProtocol::RTP_AVP;
   m.connection = c;
   session.mediaDescriptions.push_back(m);
 
@@ -2015,6 +2139,8 @@ TEST_CASE("Serializer: an IPv6 c= never emits a TTL group",
     c.ttl = 16;
     c.numberOfAddresses = 3;
     MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.protocol = TransportProtocol::RTP_AVP;
     m.connection = c;
     session.mediaDescriptions.push_back(m);
 

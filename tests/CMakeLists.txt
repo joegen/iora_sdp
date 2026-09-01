@@ -29,6 +29,7 @@ add_executable(sdp_tests
   test_round_trip.cpp
   test_webrtc_sdp.cpp
   test_effective_direction.cpp
+  test_unknown_proto_media.cpp
 )
 
 target_link_libraries(sdp_tests PRIVATE

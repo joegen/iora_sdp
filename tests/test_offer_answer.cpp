@@ -475,6 +475,7 @@ TEST_CASE("matchCodecs joins rtpmap-less static PTs (discriminator)",
   // static PTs on the m= line WITHOUT any a=rtpmap must still negotiate. Fails
   // TODAY because matchCodecs reads only rtpMaps and ignores formats.
   MediaDescription offer;
+  offer.mediaType = MediaType::AUDIO; // static-PT synthesis is audio-only
   offer.formats = {"0", "8"}; // m=audio ... RTP/AVP 0 8, no a=rtpmap lines
   // offer.rtpMaps intentionally empty
 
@@ -493,6 +494,7 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
   SECTION("3.2 mixed styles: rtpmap-less offer PT 0 vs explicit a=rtpmap answer joins")
   {
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"0"};
     MediaDescription answer;
     answer.rtpMaps.push_back({0, "PCMU", 8000, {}});
@@ -532,6 +534,7 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
   SECTION("3.5 G.722 (PT 9) synthesizes with the RFC 3551 §4.5.2 8000 RTP clock")
   {
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"9"};
     auto norm = OfferAnswer::normalizeStaticFormats(offer);
     REQUIRE(norm.size() == 1);
@@ -577,8 +580,10 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
   SECTION("L-1 both operands rtpmap-less static -> both synthesize and join")
   {
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"0", "8"};
     MediaDescription answer;
+    answer.mediaType = MediaType::AUDIO;
     answer.formats = {"0", "8"};
 
     auto result = OfferAnswer::matchCodecs(offer, answer);
@@ -619,10 +624,12 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
     // Answer (the outer/preference operand) offers PCMU(0, static-no-rtpmap)
     // first, opus(96, rtpmap) second on its m= line.
     MediaDescription answer;
+    answer.mediaType = MediaType::AUDIO;
     answer.formats = {"0", "96"};
     answer.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
 
     MediaDescription offer; // a peer that supports both
+    offer.mediaType = MediaType::AUDIO;
     offer.rtpMaps.push_back({0, "PCMU", 8000, {}});
     offer.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
 
@@ -635,6 +642,7 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
   SECTION("3.12 static + dynamic mix: both negotiate")
   {
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"0", "96"}; // PT 0 static-no-rtpmap, PT 96 dynamic-with-rtpmap
     offer.rtpMaps.push_back({96, "opus", 48000, std::uint8_t(2)});
 
@@ -657,6 +665,7 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
   SECTION("3.13 untrusted input: non-numeric / over-long / out-of-range tokens ignored, no throw")
   {
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"webrtc-datachannel", "99999999999999999999", "200", "0"};
     std::vector<RtpMapAttribute> norm;
     REQUIRE_NOTHROW(norm = OfferAnswer::normalizeStaticFormats(offer));
@@ -669,6 +678,7 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
   SECTION("3.15 CUCM/DTMF: rtpmap-less static audio + explicit telephone-event")
   {
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"0", "101"}; // PCMU (no rtpmap) + telephone-event (rtpmap)
     offer.rtpMaps.push_back({101, "telephone-event", 8000, {}});
 

@@ -635,12 +635,46 @@ struct OfferAnswer
 
     session.groups = offer.groups;
 
+    // A port-0 INACTIVE reject that echoes the offer's <media>/<proto> (incl. the
+    // raw wire token for an UNKNOWN profile — empty for a recognized one), its fmt
+    // list, and mid. The fmt list is copied verbatim: usually >=1 (RFC 4566 §5.14),
+    // but a fmt-less port-0 removal offer legitimately carries zero — the
+    // serializer supplies the mandatory placeholder fmt on output. Shared by the
+    // UNKNOWN fail-safe and the normal decline: both produce the identical
+    // rejected-stream wire shape (RFC 3264 §6/§8.2).
+    const auto rejectEcho = [](const MediaDescription& off)
+    {
+      MediaDescription a;
+      a.mediaType = off.mediaType;
+      a.rawMediaType = off.rawMediaType;
+      a.protocol = off.protocol;
+      a.rawProtocol = off.rawProtocol;
+      a.port = 0;
+      a.formats = off.formats;
+      a.direction = Direction::INACTIVE;
+      a.mid = off.mid;
+      return a;
+    };
+
     // Indexed loop so the offer's effective (session-level-folded) direction can
     // be resolved per media via offer.effectiveDirection(i).
     for (std::size_t i = 0; i < offer.mediaDescriptions.size(); ++i)
     {
       const auto& offerMedia = offer.mediaDescriptions[i];
       MediaDescription answerMedia;
+
+      // FAIL-SAFE: an offer whose <media> or <proto> token is unrecognized/
+      // malformed (UNKNOWN) is rejected with port 0 BEFORE the declined/
+      // APPLICATION/RTP dispatch — no arm may accept (port=9) a media type or
+      // transport profile we cannot faithfully model. Placed pre-dispatch so it
+      // covers the APPLICATION arm too (RFC 3264 §6: reject unsupported streams;
+      // RFC 4568 §7.1: never answer an unsupported secure profile). Echo the exact
+      // wire token so the rejected m= line round-trips (never a "" toString).
+      if (offerMedia.hasUnknownProfile())
+      {
+        session.mediaDescriptions.push_back(rejectEcho(offerMedia));
+        continue;
+      }
 
       // A section is DECLINED when offered with port 0 (RFC 3264 §6/§8.2 — the
       // answer MUST also be port 0) or when its media type is locally rejected.
@@ -657,12 +691,7 @@ struct OfferAnswer
 
       if (declined)
       {
-        answerMedia.mediaType = offerMedia.mediaType;
-        answerMedia.port = 0;
-        answerMedia.protocol = offerMedia.protocol;
-        answerMedia.formats = offerMedia.formats;
-        answerMedia.direction = Direction::INACTIVE;
-        answerMedia.mid = offerMedia.mid;
+        answerMedia = rejectEcho(offerMedia);
       }
       else if (offerMedia.mediaType == MediaType::APPLICATION)
       {

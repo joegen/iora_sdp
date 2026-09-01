@@ -512,17 +512,46 @@ inline std::string serializeMediaLevel(
   const auto& le = options.lineEnding;
   std::string result;
 
-  // m= line
-  result += "m=" + std::string(toString(media.mediaType)) + " "
-      + std::to_string(media.port);
+  // m= line. For an UNKNOWN media/proto the enum has no faithful wire spelling
+  // (toString returns ""), so emit the exact token the parser preserved — the
+  // INVARIANT "protocol==UNKNOWN iff rawProtocol non-empty" (resp. media), held by
+  // the parser and every builder, makes a faithful round-trip guaranteed and keeps
+  // this a total, non-throwing function.
+  const std::string mediaToken = (media.mediaType == MediaType::UNKNOWN)
+      ? media.rawMediaType
+      : std::string(toString(media.mediaType));
+  const std::string protoToken = (media.protocol == TransportProtocol::UNKNOWN)
+      ? media.rawProtocol
+      : std::string(toString(media.protocol));
+  result += "m=" + mediaToken + " " + std::to_string(media.port);
   if (media.numberOfPorts.has_value())
   {
     result += "/" + std::to_string(*media.numberOfPorts);
   }
-  result += " " + std::string(toString(media.protocol));
-  for (const auto& fmt : media.formats)
+  result += " " + protoToken;
+  if (media.formats.empty())
   {
-    result += " " + fmt;
+    // RFC 4566 §5.14 mandates 1*(SP fmt) on EVERY m= line, and RFC 3264 §6
+    // requires at least one even for a rejected/removed (port-0) stream — where
+    // the format is ignored. The parser is receive-liberal (it tolerates a
+    // fmt-less port-0 removal on the wire), but we must be emit-conservative:
+    // substitute a single placeholder so a strict receiver/SBC does not reject
+    // the whole body. The ONLY empty-formats section reachable via supported
+    // paths is a port-0 removal (the parser rejects an ACTIVE fmt-less line, and
+    // every createOffer/createAnswer builder sets a non-empty formats list for an
+    // active section), where the placeholder's value is ignored per RFC 3264 §6 —
+    // so this never advertises an un-offered codec on a live stream. An active
+    // empty-formats section is only reachable by directly hand-building an invalid
+    // MediaDescription (a caller precondition violation); the placeholder there is
+    // grammar-salvage, not a real codec offer.
+    result += " 0";
+  }
+  else
+  {
+    for (const auto& fmt : media.formats)
+    {
+      result += " " + fmt;
+    }
   }
   result += le;
 

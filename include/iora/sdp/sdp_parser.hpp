@@ -1232,19 +1232,38 @@ inline void dispatchMediaAttribute(
   }
 }
 
-inline MediaDescription parseMediaLine(std::string_view value)
+/// Single source for the malformed-m= diagnostic, shared by the doParse and
+/// parseMediaSection rejection sites so the two messages cannot drift.
+inline constexpr const char* kMalformedMLineError =
+  "Malformed m= line: RFC 4566 §5.14 requires "
+  "<media> <port> <proto> 1*(SP <fmt>)";
+
+/// Parses an m= line value (the text after "m="). Returns std::nullopt when the
+/// line is malformed per RFC 4566 §5.14 `m=<media> <port> <proto> 1*(SP <fmt>)` —
+/// either fewer than the three mandatory <media> <port> <proto> components, or
+/// zero <fmt> tokens — so the caller can reject it rather than admit a degenerate
+/// section that would serialize to an RFC-invalid m= line. A section with an
+/// unrecognized (but present) <media> or <proto> token is NOT malformed: it parses
+/// to the UNKNOWN sentinel with the exact wire token preserved on
+/// rawMediaType/rawProtocol.
+inline std::optional<MediaDescription> parseMediaLine(std::string_view value)
 {
   MediaDescription md;
   std::istringstream iss{std::string(value)};
   std::string mediaStr, portStr, protoStr;
   if (!(iss >> mediaStr >> portStr >> protoStr))
   {
-    return md;
+    return std::nullopt;
   }
 
   if (auto mt = mediaTypeFromString(mediaStr))
   {
     md.mediaType = *mt;
+  }
+  else
+  {
+    md.mediaType = MediaType::UNKNOWN;
+    md.rawMediaType = mediaStr;
   }
 
   auto slash = portStr.find('/');
@@ -1271,11 +1290,28 @@ inline MediaDescription parseMediaLine(std::string_view value)
   {
     md.protocol = *tp;
   }
+  else
+  {
+    md.protocol = TransportProtocol::UNKNOWN;
+    md.rawProtocol = protoStr;
+  }
 
   std::string fmt;
   while (iss >> fmt)
   {
     md.formats.push_back(fmt);
+  }
+
+  // RFC 4566 §5.14: m=<media> <port> <proto> 1*(SP <fmt>). A zero-<fmt> line is
+  // malformed for an ACTIVE stream (port != 0) — reject it (nullopt) so it never
+  // serializes to an RFC-invalid fmt-less m= line. A zero-<fmt> line with port 0
+  // is TOLERATED: it is the RFC 3264 §8.2 stream-REMOVAL form some endpoints emit
+  // (`m=<media> 0 <proto>`), and dropping it would silently defeat the removal.
+  // Such a removal round-trips as-is (port 0, empty fmt) and is never an active
+  // stream, so no media flows.
+  if (md.formats.empty() && md.port != 0)
+  {
+    return std::nullopt;
   }
   return md;
 }
@@ -1361,7 +1397,21 @@ inline ParseResult<SessionDescription> doParse(
         result.error = ParseError{lineNum, "Exceeded maxMediaSections limit"};
         return result;
       }
-      session.mediaDescriptions.push_back(parseMediaLine(val));
+      auto parsed = parseMediaLine(val);
+      if (!parsed)
+      {
+        // A malformed m= line (missing <media>/<port>/<proto>, or zero <fmt> —
+        // RFC 4566 §5.14) is a HARD ERROR in BOTH strict and lenient modes, like
+        // the maxMediaSections limit above. It is not a salvageable attribute:
+        // dropping just the section would reduce the m= count and desync RFC 3264
+        // §6 positional offer/answer correspondence (and BUNDLE mid association),
+        // so the whole parse fails and the caller rejects the offer wholesale
+        // rather than answering a subset.
+        result.value.reset();
+        result.error = ParseError{lineNum, kMalformedMLineError};
+        return result;
+      }
+      session.mediaDescriptions.push_back(std::move(*parsed));
       inMedia = true;
       continue;
     }
@@ -1672,7 +1722,13 @@ struct SdpParser
       return result;
     }
 
-    auto media = detail::parseMediaLine(val);
+    auto parsedMedia = detail::parseMediaLine(val);
+    if (!parsedMedia)
+    {
+      result.error = ParseError{1, detail::kMalformedMLineError};
+      return result;
+    }
+    auto media = std::move(*parsedMedia);
     std::optional<ParseError> dispatchError;
 
     for (std::size_t i = 1; i < lines.size(); ++i)

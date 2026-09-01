@@ -48,7 +48,14 @@ enum class MediaType
   VIDEO,
   APPLICATION,
   TEXT,
-  MESSAGE
+  MESSAGE,
+  /// Fail-safe sentinel for an m= <media> token outside the recognized set (or a
+  /// malformed m= line). Never the struct default's silent AUDIO — a consumer that
+  /// trusts the parsed media type must be able to distinguish "explicitly audio"
+  /// from "unrecognized". The exact wire token is preserved on
+  /// MediaDescription::rawMediaType. toString(UNKNOWN) returns "" (the serializer
+  /// emits the preserved raw token, not this).
+  UNKNOWN
 };
 
 /// Returns the SDP wire-format string for a MediaType.
@@ -61,8 +68,9 @@ inline std::string_view toString(MediaType v) noexcept
     case MediaType::APPLICATION: return "application";
     case MediaType::TEXT:        return "text";
     case MediaType::MESSAGE:     return "message";
+    case MediaType::UNKNOWN:     return "";
   }
-  return "audio";
+  return "";
 }
 
 /// Parses a media type string (case-insensitive).
@@ -88,7 +96,14 @@ enum class TransportProtocol
   UDP_TLS_RTP_SAVPF,
   DTLS_SCTP,
   UDP_DTLS_SCTP,
-  TCP_DTLS_SCTP
+  TCP_DTLS_SCTP,
+  /// Fail-safe sentinel for an m= <proto> token outside the recognized set (or a
+  /// malformed m= line). Never the struct default's silent RTP_AVP — this is the
+  /// control that keeps a downstream profile-correspondence/security gate from
+  /// committing a secure stream sent under an unrecognized spelling as plaintext
+  /// RTP/AVP. The exact wire token is preserved on MediaDescription::rawProtocol.
+  /// toString(UNKNOWN) returns "" (the serializer emits the preserved raw token).
+  UNKNOWN
 };
 
 /// Returns the SDP wire-format string (slashes, not underscores).
@@ -104,8 +119,9 @@ inline std::string_view toString(TransportProtocol v) noexcept
     case TransportProtocol::DTLS_SCTP:          return "DTLS/SCTP";
     case TransportProtocol::UDP_DTLS_SCTP:      return "UDP/DTLS/SCTP";
     case TransportProtocol::TCP_DTLS_SCTP:      return "TCP/DTLS/SCTP";
+    case TransportProtocol::UNKNOWN:            return "";
   }
-  return "UDP";
+  return "";
 }
 
 /// Parses a transport protocol string with slashes (case-insensitive).

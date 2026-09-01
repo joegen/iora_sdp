@@ -150,11 +150,24 @@ struct TimeDescription
 /// Represents a single m= block — one media section with its associated attributes.
 struct MediaDescription
 {
-  MediaType mediaType = MediaType::AUDIO;
+  MediaType mediaType = MediaType::UNKNOWN;
   std::uint16_t port = 0;             ///< Transport port (0 = rejected)
   std::optional<std::uint16_t> numberOfPorts; ///< Number of ports (multicast)
-  TransportProtocol protocol = TransportProtocol::RTP_AVP;
+  TransportProtocol protocol = TransportProtocol::UNKNOWN;
   std::vector<std::string> formats;    ///< Payload type numbers or format strings
+  /// Exact wire token when mediaType/protocol resolve to UNKNOWN — the parser
+  /// preserves the original spelling so the serializer round-trips it faithfully
+  /// (never a toString fallback) and a port-0 reject echoes the real proto/media.
+  /// INVARIANT (guaranteed by the parser and by createOffer/createAnswer/
+  /// addTransceiver/addDataChannel): rawMediaType is non-empty IFF
+  /// mediaType == UNKNOWN (resp. rawProtocol / protocol). A section obtained via
+  /// those paths therefore never carries UNKNOWN with an empty raw token — a
+  /// directly default-constructed MediaDescription (UNKNOWN + empty raw) is NOT a
+  /// serializable section; build one through the parser or a builder. The fields
+  /// participate in operator== so two distinct unrecognized tokens do not compare
+  /// equal.
+  std::string rawMediaType;
+  std::string rawProtocol;
   std::optional<ConnectionData> connection; ///< Media-level c= line
   std::vector<BandwidthInfo> bandwidths;
   std::optional<std::string> encryptionKey; ///< k= line (deprecated)
@@ -200,6 +213,8 @@ struct MediaDescription
         && port == other.port
         && numberOfPorts == other.numberOfPorts
         && protocol == other.protocol
+        && rawMediaType == other.rawMediaType
+        && rawProtocol == other.rawProtocol
         && formats == other.formats
         && connection == other.connection
         && bandwidths == other.bandwidths
@@ -239,6 +254,15 @@ struct MediaDescription
   bool operator!=(const MediaDescription& other) const noexcept
   {
     return !(*this == other);
+  }
+
+  /// True when the m= <media> or <proto> token was outside the recognized set (the
+  /// fail-safe UNKNOWN sentinel). The single predicate every gate/answerer uses to
+  /// reject a section whose profile we cannot faithfully model — never silently
+  /// coerce it to a recognized value (iora_sdp 2026-07-31-1).
+  bool hasUnknownProfile() const noexcept
+  {
+    return mediaType == MediaType::UNKNOWN || protocol == TransportProtocol::UNKNOWN;
   }
 };
 
