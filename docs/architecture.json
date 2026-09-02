@@ -554,7 +554,7 @@
       },
       "createAnswer": {
         "signature": "SessionDescription createAnswer(const SessionDescription& offer, const AnswerOptions& answerOptions)",
-        "description": "Generate an SDP answer from a received offer. Intersects codecs per media section (retaining answerer preference order), generates its own ICE credentials (or uses answerOptions-supplied ones), sets direction by flipping the offer's direction (sendonly->recvonly, recvonly->sendonly, sendrecv->sendrecv, inactive->inactive), and copies BUNDLE group if present.",
+        "description": "Generate an SDP answer from a received offer. Intersects codecs per media section (retaining answerer preference order), generates its own ICE credentials (or uses answerOptions-supplied ones), and sets direction by flipping the offer's direction (sendonly->recvonly, recvonly->sendonly, sendrecv->sendrecv, inactive->inactive). NON-BUNDLE-AWARE: it does NOT copy the offer's a=group attributes (BUNDLE or LS) into the answer — echoing a=group:BUNDLE would name port-0 rejected sections (RFC 8843 §7.3.3(a)) and the function implements none of §7.3's positive answerer obligations; a non-BUNDLE answer (no a=group, per-m= ports) is the RFC 8843 §1.2 backward-compat baseline. A BUNDLE/WebRTC consumer must not route BUNDLE offers through this primitive (tasks 2026-07-25-2, 2026-09-02-4/5/6/7).",
         "options": {
           "AnswerOptions": {
             "iceUfrag": "std::optional<std::string> — answerer's ICE username fragment (generated if not provided)",

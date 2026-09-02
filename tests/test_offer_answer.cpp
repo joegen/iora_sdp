@@ -1348,16 +1348,18 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     REQUIRE(answer.mediaDescriptions[1].mid.value() == "1");
   }
 
-  SECTION("BUNDLE group copied from offer")
+  SECTION("createAnswer is non-BUNDLE-aware: no a=group in the answer (RFC 8843 §7.3)")
   {
+    // createAnswer does NOT copy the offer's a=group. Echoing a=group:BUNDLE
+    // would name the mids of port-0 rejected sections (RFC 8843 §7.3.3(a) MUST
+    // NOT), and this function implements none of §7.3's positive answerer
+    // obligations. A non-BUNDLE answer (no a=group, per-m= ports) is conformant.
     auto offer = makeOffer();
-    REQUIRE(offer.groups.size() == 1);
+    REQUIRE(offer.groups.size() == 1); // offer carries a=group:BUNDLE
 
     auto answer = OfferAnswer::createAnswer(offer);
 
-    REQUIRE(answer.groups.size() == 1);
-    REQUIRE(answer.groups[0].semantics == "BUNDLE");
-    REQUIRE(answer.groups[0].mids == offer.groups[0].mids);
+    REQUIRE(answer.groups.empty()); // mutation guard: restoring the copy fails here
   }
 
   SECTION("answerer's ICE credentials used (not offerer's)")
@@ -2336,5 +2338,137 @@ TEST_CASE("createAnswer: answerer-declared attribute negotiation",
     const auto before = opts.supportedMedia;
     (void)OfferAnswer::createAnswer(offer, opts);
     REQUIRE(opts.supportedMedia == before);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// createAnswer is non-BUNDLE-aware (tracker 2026-07-25-2, disposition C).
+// It never copies the offer's a=group attributes: echoing a=group:BUNDLE would
+// name port-0 rejected sections (RFC 8843 §7.3.3(a)) and copying a=group:LS
+// would assert lip-sync across a rejected/INACTIVE stream (RFC 5888 §7; an
+// answerer omits an unsupported group per §9.2); the function implements none of
+// RFC 8843 §7.3's positive answerer obligations. A non-BUNDLE answer (no
+// a=group, per-m= ports) is fully conformant.
+// ---------------------------------------------------------------------------
+TEST_CASE("createAnswer: non-BUNDLE-aware — no a=group emitted",
+          "[offer_answer][bundle][group]")
+{
+  // Types resolve via the file-scope `using namespace iora::sdp;`.
+  auto twoSectionOffer = [](const std::string& groupSemantics)
+  {
+    SessionDescription offer;
+    MediaDescription a;
+    a.mediaType = MediaType::AUDIO;
+    a.port = 5004;
+    a.protocol = TransportProtocol::RTP_AVP;
+    a.direction = Direction::SENDRECV;
+    a.formats = {"0"};
+    a.rtpMaps.push_back({0, "PCMU", 8000, std::uint8_t(1)});
+    a.mid = "0";
+    MediaDescription v;
+    v.mediaType = MediaType::VIDEO;
+    v.port = 5006;
+    v.protocol = TransportProtocol::RTP_AVP;
+    v.direction = Direction::SENDRECV;
+    v.formats = {"96"};
+    v.rtpMaps.push_back({96, "VP8", 90000, {}});
+    v.mid = "1";
+    offer.mediaDescriptions.push_back(std::move(a));
+    offer.mediaDescriptions.push_back(std::move(v));
+    GroupAttribute g;
+    g.semantics = groupSemantics;
+    g.mids = {"0", "1"};
+    offer.groups.push_back(std::move(g));
+    return offer;
+  };
+
+  SECTION("BUNDLE offer, no rejection -> no a=group, but mids preserved (RFC 5888 §9.2)")
+  {
+    auto offer = twoSectionOffer("BUNDLE");
+    auto answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(answer.groups.empty());
+    // Dropping the group must NOT drop the a=mid attributes (RFC 5888 §9.2).
+    REQUIRE(answer.mediaDescriptions.size() == 2);
+    REQUIRE(answer.mediaDescriptions[0].mid.value() == "0");
+    REQUIRE(answer.mediaDescriptions[1].mid.value() == "1");
+  }
+
+  SECTION("BUNDLE offer, video rejected via rejectMediaTypes -> no group, video port 0, no bundle-only")
+  {
+    auto offer = twoSectionOffer("BUNDLE");
+    // a=bundle-only is unmodeled (tracker 2026-09-02-5) — it lands in generic
+    // attributes; a rejected section must not carry it (RFC 8843 §7.3.3(c)).
+    offer.mediaDescriptions[1].genericAttributes.push_back({"bundle-only", std::nullopt});
+    AnswerOptions opts;
+    opts.rejectMediaTypes = {MediaType::VIDEO};
+    auto answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.groups.empty());
+    REQUIRE(answer.mediaDescriptions[1].port == 0);         // video rejected
+    REQUIRE(answer.mediaDescriptions[1].direction == Direction::INACTIVE);
+    REQUIRE(answer.mediaDescriptions[0].port != 0);         // audio accepted
+    // rejectEcho drops genericAttributes, so no a=bundle-only leaks into the reject.
+    const auto& videoGas = answer.mediaDescriptions[1].genericAttributes;
+    REQUIRE(std::none_of(videoGas.begin(), videoGas.end(),
+                         [](const auto& ga) { return ga.name == "bundle-only"; }));
+  }
+
+  SECTION("LS group is also dropped (RFC 5888 §9.2 — answerer omits an unimplemented group)")
+  {
+    auto offer = twoSectionOffer("LS");
+    auto answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(answer.groups.empty());
+  }
+
+  SECTION("m=image section in a BUNDLE offer -> rejected, no group")
+  {
+    auto offer = twoSectionOffer("BUNDLE");
+    offer.mediaDescriptions[1].mediaType = MediaType::IMAGE;
+    auto answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(answer.groups.empty());
+    REQUIRE(answer.mediaDescriptions[1].port == 0);
+  }
+
+  SECTION("UNKNOWN-profile section in a BUNDLE offer -> rejected, no group")
+  {
+    auto offer = twoSectionOffer("BUNDLE");
+    // Unrecognized <proto> => hasUnknownProfile() reject site (distinct from IMAGE).
+    offer.mediaDescriptions[1].protocol = TransportProtocol::UNKNOWN;
+    offer.mediaDescriptions[1].rawProtocol = "SOME/WEIRD/PROFILE";
+    auto answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(answer.groups.empty());
+    REQUIRE(answer.mediaDescriptions[1].port == 0);
+  }
+
+  SECTION("supportedMedia with no codec overlap -> section rejected, no group")
+  {
+    auto offer = twoSectionOffer("BUNDLE");
+    AnswerOptions opts;
+    opts.supportedMedia = MediaDescription{};
+    // Answerer supports only G722 — no overlap with PCMU/VP8 -> matched.empty path.
+    opts.supportedMedia->rtpMaps.push_back({9, "G722", 8000, std::uint8_t(1)});
+    auto answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.groups.empty());
+    REQUIRE(answer.mediaDescriptions[0].port == 0);
+    REQUIRE(answer.mediaDescriptions[0].direction == Direction::INACTIVE);
+  }
+
+  SECTION("round-trip: createOffer(bundle) -> createAnswer -> serialize -> no a=group on the wire")
+  {
+    iora::sdp::OfferOptions offerOpts;
+    offerOpts.iceUfrag = "offerufrag";
+    offerOpts.icePwd = "offerpwd12345678901234";
+    auto offer = OfferAnswer::createOffer(offerOpts);
+    offer.mediaDescriptions[0].rtpMaps.push_back({0, "PCMU", 8000, std::uint8_t(1)});
+    offer.mediaDescriptions[0].formats = {"0"};
+    auto answer = OfferAnswer::createAnswer(offer);
+    REQUIRE(answer.groups.empty());
+
+    const std::string sdp = SdpSerializer::serialize(answer);
+    REQUIRE(sdp.find("a=group") == std::string::npos); // no group line on the wire
+    auto parsed = SdpParser::parse(sdp);
+    REQUIRE(parsed.hasValue());
+    REQUIRE(parsed.value->groups.empty());
+    // m= count preserved through the round-trip.
+    REQUIRE(parsed.value->mediaDescriptions.size() == answer.mediaDescriptions.size());
   }
 }

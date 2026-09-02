@@ -775,7 +775,19 @@ struct OfferAnswer
     session.setup = answerOptions.dtlsSetup;
     session.iceOptions = {"trickle"};
 
-    session.groups = offer.groups;
+    // createAnswer is deliberately NON-BUNDLE-AWARE: it does NOT copy the offer's
+    // a=group attributes into the answer. Echoing a=group:BUNDLE would name the
+    // mids of sections this function rejects at port 0 (RFC 8843 §7.3.3(a) MUST
+    // NOT), and echoing a=group:LS would assert lip-sync across a port-0/INACTIVE
+    // rejected stream; more fundamentally this function implements none of RFC
+    // 8843 §7.3's positive answerer obligations (no answerer-tagged section, no
+    // a=bundle-only, every accepted section gets its own port), so advertising
+    // any a=group would be a false claim. Per RFC 5888 §9.2 an answerer that does
+    // not support a group's semantics returns an answer WITHOUT the group line
+    // (mids are retained). A non-BUNDLE answer (no a=group, per-m= ports) is the
+    // RFC 8843 §1.2 backward-compat baseline and is fully §7.3-conformant. A
+    // BUNDLE/WebRTC consumer must NOT route BUNDLE offers through this generic
+    // primitive (see tasks 2026-07-25-2 disposition C, 2026-09-02-5/6).
 
     // A port-0 INACTIVE reject that echoes the offer's <media>/<proto> (incl. the
     // raw wire token for an UNKNOWN profile — empty for a recognized one), its fmt

@@ -1867,13 +1867,18 @@ struct OfferAnswer
   /// ICE credentials (if not provided), trickle ice-options, BUNDLE group.
   static SessionDescription createOffer(const OfferOptions& options = {});
 
-  /// Generate answer from offer: copies groups, creates matching media sections
-  /// with flipped directions. If supportedMedia is provided, emits the answerer's
-  /// own fmtp/rtcp-fb/extmap for the negotiated codecs (intersected with the
-  /// offer); otherwise echoes the offer's codecs + fmtp/rtcp-fb, still flipping
-  /// a=extmap direction (RFC 8285 §7). Media rejection if mediaType in
-  /// rejectMediaTypes. Application (data channel) media sections copied as-is.
-  /// Auto-generates ICE credentials.
+  /// Generate answer from offer: creates matching media sections with flipped
+  /// directions. NON-BUNDLE-AWARE — does NOT copy the offer's a=group (BUNDLE or
+  /// LS): echoing a=group:BUNDLE would name port-0 rejected sections (RFC 8843
+  /// §7.3.3(a)) and this function honors none of §7.3's positive BUNDLE
+  /// obligations; a non-BUNDLE answer is the RFC 8843 §1.2 baseline (RFC 5888
+  /// §9.2). If supportedMedia is provided, emits the answerer's own
+  /// fmtp/rtcp-fb/extmap for the negotiated codecs (intersected with the offer);
+  /// otherwise echoes the offer's codecs + fmtp/rtcp-fb, still flipping a=extmap
+  /// direction (RFC 8285 §7). Media rejection if mediaType in rejectMediaTypes.
+  /// Application (data channel) sections are accepted (port 9, SENDRECV) with
+  /// protocol/formats/mid/rtcp-mux/sctp-port/max-message-size carried over from
+  /// the offer (no codec negotiation). Auto-generates ICE credentials.
   static SessionDescription createAnswer(
       const SessionDescription& offer, const AnswerOptions& answerOptions = {});
 };
