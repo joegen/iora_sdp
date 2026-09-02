@@ -1266,24 +1266,43 @@ inline std::optional<MediaDescription> parseMediaLine(std::string_view value)
     md.rawMediaType = mediaStr;
   }
 
+  // RFC 4566 §5.14: <port> is a number (optionally "<port>/<number of ports>").
+  // A non-numeric, out-of-range, or missing <port> — or a present-but-
+  // unparseable /<n> count — is a malformed m= line: return nullopt so the whole
+  // parse is rejected (in BOTH strict and lenient modes), rather than silently
+  // coercing the port to its 0 default (which masquerades as an RFC 3264 §8.2
+  // stream removal) or dropping the count. The reject keys off parse FAILURE
+  // (parseUint16 == nullopt), NEVER off the parsed value being 0 — an explicit
+  // "0" parses successfully and remains a legitimate removal. Mirrors the
+  // parseConnection reject idiom (if (!ttl || !num) return nullopt).
+  //
+  // <number of ports> caveat: the count is parsed with parseUint16, an
+  // intentional sane engineering cap that is NARROWER than the RFC 4566 §5.14
+  // ABNF (`integer` is unbounded) — a count > 65535 is rejected. Conversely the
+  // count half currently TOLERATES `/0` and leading zeros, which the ABNF
+  // (`integer = POS-DIGIT *DIGIT`, i.e. >= 1, no leading zero) forbids; that
+  // count>=1 semantic validation is deliberately out of scope here and tracked
+  // as backlog 2026-09-02-2. Only parse FAILURE of the count is rejected here.
   auto slash = portStr.find('/');
   if (slash != std::string::npos)
   {
-    if (auto p = parseUint16(std::string_view(portStr).substr(0, slash)))
+    auto p = parseUint16(std::string_view(portStr).substr(0, slash));
+    auto n = parseUint16(std::string_view(portStr).substr(slash + 1));
+    if (!p || !n)
     {
-      md.port = *p;
+      return std::nullopt;
     }
-    if (auto n = parseUint16(std::string_view(portStr).substr(slash + 1)))
-    {
-      md.numberOfPorts = *n;
-    }
+    md.port = *p;
+    md.numberOfPorts = *n;
   }
   else
   {
-    if (auto p = parseUint16(portStr))
+    auto p = parseUint16(portStr);
+    if (!p)
     {
-      md.port = *p;
+      return std::nullopt;
     }
+    md.port = *p;
   }
 
   if (auto tp = transportProtocolFromString(protoStr))
@@ -1702,8 +1721,12 @@ struct SdpParser
 
   /// Parse a single media section (m= line and subsequent lines).
   ///
-  /// Always lenient: malformed lines are reported as warnings, never as errors.
-  /// There is no strict mode for a standalone media section.
+  /// The m= header line itself is a HARD ERROR when malformed (missing/empty
+  /// section, a non-m= first line, or a malformed m= line — e.g. a non-numeric
+  /// port — yields kMalformedMLineError), exactly as in doParse. Only the
+  /// SUBSEQUENT body lines are lenient: a malformed body line is reported as a
+  /// warning and skipped, never an error. There is no strict mode for a
+  /// standalone media section.
   static ParseResult<MediaDescription> parseMediaSection(std::string_view text)
   {
     ParseResult<MediaDescription> result;
