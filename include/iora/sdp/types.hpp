@@ -5,9 +5,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace iora {
 namespace sdp {
@@ -49,6 +51,10 @@ enum class MediaType
   APPLICATION,
   TEXT,
   MESSAGE,
+  /// T.38 fax media (m=image ... udptl, ITU-T T.38 / RFC 4566). Recognized so the
+  /// media type is faithfully modeled, but NOT RTP-serviceable — the RTP engine
+  /// port-0-rejects it (iora_media isServiceableMediaType).
+  IMAGE,
   /// Fail-safe sentinel for an m= <media> token outside the recognized set (or a
   /// malformed m= line). Never the struct default's silent AUDIO — a consumer that
   /// trusts the parsed media type must be able to distinguish "explicitly audio"
@@ -68,6 +74,7 @@ inline std::string_view toString(MediaType v) noexcept
     case MediaType::APPLICATION: return "application";
     case MediaType::TEXT:        return "text";
     case MediaType::MESSAGE:     return "message";
+    case MediaType::IMAGE:       return "image";
     case MediaType::UNKNOWN:     return "";
   }
   return "";
@@ -82,8 +89,30 @@ inline std::optional<MediaType> mediaTypeFromString(std::string_view s)
   if (lower == "application") return MediaType::APPLICATION;
   if (lower == "text")        return MediaType::TEXT;
   if (lower == "message")     return MediaType::MESSAGE;
+  if (lower == "image")       return MediaType::IMAGE;
   return std::nullopt;
 }
+
+/// Single-source list of every recognized MediaType with its canonical wire
+/// spelling. Used by the round-trip test to iterate the REAL member set (not a
+/// hand-copied literal); the static_assert below fails the build if a new member
+/// is added without a row here. Excludes UNKNOWN (the sentinel, wire spelling "").
+inline constexpr std::pair<MediaType, std::string_view> kAllMediaTypes[] = {
+  {MediaType::AUDIO,       "audio"},
+  {MediaType::VIDEO,       "video"},
+  {MediaType::APPLICATION, "application"},
+  {MediaType::TEXT,        "text"},
+  {MediaType::MESSAGE,     "message"},
+  {MediaType::IMAGE,       "image"},
+};
+
+// UNKNOWN MUST remain the terminal enumerator: this exhaustiveness check
+// (member count == UNKNOWN's ordinal) is sound only while UNKNOWN is last. A
+// member added AFTER UNKNOWN would be silently untested (no -Werror=switch net).
+static_assert(static_cast<std::size_t>(MediaType::UNKNOWN) ==
+                sizeof(kAllMediaTypes) / sizeof(kAllMediaTypes[0]),
+              "kAllMediaTypes must list every recognized MediaType and UNKNOWN "
+              "must be the last enumerator");
 
 /// SDP transport protocols from the m= line proto field.
 /// Enum values use underscores where SDP uses slashes.
@@ -91,12 +120,22 @@ enum class TransportProtocol
 {
   UDP,
   RTP_AVP,
+  /// RFC 4585 AVPF (RTP + RTCP feedback). Insecure, UDP-transported — the RTP
+  /// engine serves it as plain AVP (no a=rtcp-fb negotiated, RFC 4585 §4.2),
+  /// echoing RTP/AVPF in the answer.
+  RTP_AVPF,
   RTP_SAVP,
   RTP_SAVPF,
+  /// RFC 5764 §9 DTLS-SRTP without RTCP feedback (no trailing F). Completes the
+  /// UDP/TLS/RTP pair. Not engine-serviceable (no SRTP in src/rtp) -> port-0.
+  UDP_TLS_RTP_SAVP,
   UDP_TLS_RTP_SAVPF,
   DTLS_SCTP,
   UDP_DTLS_SCTP,
   TCP_DTLS_SCTP,
+  /// ITU-T T.38 fax over UDPTL (m=image ... udptl). NOT RTP — the RTP engine
+  /// port-0-rejects it; never enters the iora_sip isRtp PT-validation set.
+  UDPTL,
   /// Fail-safe sentinel for an m= <proto> token outside the recognized set (or a
   /// malformed m= line). Never the struct default's silent RTP_AVP — this is the
   /// control that keeps a downstream profile-correspondence/security gate from
@@ -113,12 +152,15 @@ inline std::string_view toString(TransportProtocol v) noexcept
   {
     case TransportProtocol::UDP:                return "UDP";
     case TransportProtocol::RTP_AVP:            return "RTP/AVP";
+    case TransportProtocol::RTP_AVPF:           return "RTP/AVPF";
     case TransportProtocol::RTP_SAVP:           return "RTP/SAVP";
     case TransportProtocol::RTP_SAVPF:          return "RTP/SAVPF";
+    case TransportProtocol::UDP_TLS_RTP_SAVP:   return "UDP/TLS/RTP/SAVP";
     case TransportProtocol::UDP_TLS_RTP_SAVPF:  return "UDP/TLS/RTP/SAVPF";
     case TransportProtocol::DTLS_SCTP:          return "DTLS/SCTP";
     case TransportProtocol::UDP_DTLS_SCTP:      return "UDP/DTLS/SCTP";
     case TransportProtocol::TCP_DTLS_SCTP:      return "TCP/DTLS/SCTP";
+    case TransportProtocol::UDPTL:              return "udptl";
     case TransportProtocol::UNKNOWN:            return "";
   }
   return "";
@@ -130,14 +172,41 @@ inline std::optional<TransportProtocol> transportProtocolFromString(std::string_
   auto lower = detail::toLower(s);
   if (lower == "udp")                return TransportProtocol::UDP;
   if (lower == "rtp/avp")           return TransportProtocol::RTP_AVP;
+  if (lower == "rtp/avpf")          return TransportProtocol::RTP_AVPF;
   if (lower == "rtp/savp")          return TransportProtocol::RTP_SAVP;
   if (lower == "rtp/savpf")         return TransportProtocol::RTP_SAVPF;
+  if (lower == "udp/tls/rtp/savp")  return TransportProtocol::UDP_TLS_RTP_SAVP;
   if (lower == "udp/tls/rtp/savpf") return TransportProtocol::UDP_TLS_RTP_SAVPF;
   if (lower == "dtls/sctp")         return TransportProtocol::DTLS_SCTP;
   if (lower == "udp/dtls/sctp")     return TransportProtocol::UDP_DTLS_SCTP;
   if (lower == "tcp/dtls/sctp")     return TransportProtocol::TCP_DTLS_SCTP;
+  if (lower == "udptl")             return TransportProtocol::UDPTL;
   return std::nullopt;
 }
+
+/// Single-source list of every recognized TransportProtocol with its canonical
+/// wire spelling (slashes, IANA proto case). Iterated by the round-trip test; the
+/// static_assert below fails the build if a member lacks a row. Excludes UNKNOWN.
+inline constexpr std::pair<TransportProtocol, std::string_view>
+  kAllTransportProtocols[] = {
+    {TransportProtocol::UDP,                "UDP"},
+    {TransportProtocol::RTP_AVP,            "RTP/AVP"},
+    {TransportProtocol::RTP_AVPF,           "RTP/AVPF"},
+    {TransportProtocol::RTP_SAVP,           "RTP/SAVP"},
+    {TransportProtocol::RTP_SAVPF,          "RTP/SAVPF"},
+    {TransportProtocol::UDP_TLS_RTP_SAVP,   "UDP/TLS/RTP/SAVP"},
+    {TransportProtocol::UDP_TLS_RTP_SAVPF,  "UDP/TLS/RTP/SAVPF"},
+    {TransportProtocol::DTLS_SCTP,          "DTLS/SCTP"},
+    {TransportProtocol::UDP_DTLS_SCTP,      "UDP/DTLS/SCTP"},
+    {TransportProtocol::TCP_DTLS_SCTP,      "TCP/DTLS/SCTP"},
+    {TransportProtocol::UDPTL,              "udptl"},
+};
+
+// UNKNOWN MUST remain the terminal enumerator (see the MediaType note above).
+static_assert(static_cast<std::size_t>(TransportProtocol::UNKNOWN) ==
+                sizeof(kAllTransportProtocols) / sizeof(kAllTransportProtocols[0]),
+              "kAllTransportProtocols must list every recognized "
+              "TransportProtocol and UNKNOWN must be the last enumerator");
 
 /// SDP network type (c= and o= lines). Only IN (Internet) is defined.
 enum class NetworkType

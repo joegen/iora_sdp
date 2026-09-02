@@ -36,14 +36,15 @@ std::string withHeader(const std::string& mLineAndAttrs)
 TEST_CASE("parser: unrecognized proto -> UNKNOWN, raw token preserved",
           "[unknown][parser][proto]")
 {
-  // RFC 5764 UDP/TLS/RTP/SAVP (no trailing F) is a real secure profile that the
-  // current recognized table misses — it MUST NOT silently default to RTP/AVP.
-  auto r = SdpParser::parse(withHeader("m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n"));
+  // A genuinely unregistered secure-looking proto (2026-09-01-1 recognized the
+  // real spellings RTP/AVPF, UDP/TLS/RTP/SAVP, etc.) MUST NOT silently default to
+  // RTP/AVP — it fail-safe-resolves to UNKNOWN with the raw token preserved.
+  auto r = SdpParser::parse(withHeader("m=audio 5004 SOME/VENDOR/SAVP 0\r\n"));
   REQUIRE(r.value.has_value());
   REQUIRE(r.value->mediaDescriptions.size() == 1);
   const auto& m = r.value->mediaDescriptions[0];
   REQUIRE(m.protocol == TransportProtocol::UNKNOWN);
-  REQUIRE(m.rawProtocol == "UDP/TLS/RTP/SAVP"); // exact spelling & case
+  REQUIRE(m.rawProtocol == "SOME/VENDOR/SAVP"); // exact spelling & case
   REQUIRE(m.mediaType == MediaType::AUDIO);       // media token IS recognized
   REQUIRE(m.rawMediaType.empty());
 }
@@ -51,14 +52,16 @@ TEST_CASE("parser: unrecognized proto -> UNKNOWN, raw token preserved",
 TEST_CASE("parser: unrecognized media -> UNKNOWN, raw token preserved",
           "[unknown][parser][media]")
 {
-  auto r = SdpParser::parse(withHeader("m=image 49172 udptl t38\r\n"));
+  // A genuinely unrecognized media token (image is now recognized as of
+  // 2026-09-01-1) fail-safe-resolves to UNKNOWN with the raw token preserved.
+  auto r = SdpParser::parse(withHeader("m=holo 49172 SOME/VENDOR t38\r\n"));
   REQUIRE(r.value.has_value());
   REQUIRE(r.value->mediaDescriptions.size() == 1);
   const auto& m = r.value->mediaDescriptions[0];
   REQUIRE(m.mediaType == MediaType::UNKNOWN);
-  REQUIRE(m.rawMediaType == "image");
+  REQUIRE(m.rawMediaType == "holo");
   REQUIRE(m.protocol == TransportProtocol::UNKNOWN);
-  REQUIRE(m.rawProtocol == "udptl");
+  REQUIRE(m.rawProtocol == "SOME/VENDOR");
 }
 
 TEST_CASE("parser: exact-case preservation of an unknown proto",
@@ -71,16 +74,35 @@ TEST_CASE("parser: exact-case preservation of an unknown proto",
   REQUIRE(m.rawProtocol == "RtP/FoO/SaVp");
 }
 
-TEST_CASE("parser: RTP/AVPF (RFC 4585, not in the recognized table) -> UNKNOWN",
-          "[unknown][parser][proto][regression]")
+TEST_CASE("parser: the 2026-09-01-1 tokens are NOW recognized (not UNKNOWN, no raw)",
+          "[unknown][parser][proto][media][regression]")
 {
-  // Real-world spelling that fail-safe-rejects TODAY (recognition is the split-out
-  // tracker 2026-09-01-1); it must parse to UNKNOWN, not silently to RTP/AVP.
-  auto r = SdpParser::parse(withHeader("m=audio 5004 RTP/AVPF 0\r\n"));
-  REQUIRE(r.value.has_value());
-  const auto& m = r.value->mediaDescriptions[0];
-  REQUIRE(m.protocol == TransportProtocol::UNKNOWN);
-  REQUIRE(m.rawProtocol == "RTP/AVPF");
+  // These four regressed under the P0 UNKNOWN fail-safe and are recognized by
+  // 2026-09-01-1: they must parse to their real enums with NO raw token retained,
+  // never silently to RTP/AVP / AUDIO.
+  {
+    auto r = SdpParser::parse(withHeader("m=audio 5004 RTP/AVPF 0\r\n"));
+    REQUIRE(r.value.has_value());
+    const auto& m = r.value->mediaDescriptions[0];
+    REQUIRE(m.protocol == TransportProtocol::RTP_AVPF);
+    REQUIRE(m.rawProtocol.empty());
+  }
+  {
+    auto r = SdpParser::parse(withHeader("m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n"));
+    REQUIRE(r.value.has_value());
+    const auto& m = r.value->mediaDescriptions[0];
+    REQUIRE(m.protocol == TransportProtocol::UDP_TLS_RTP_SAVP);
+    REQUIRE(m.rawProtocol.empty());
+  }
+  {
+    auto r = SdpParser::parse(withHeader("m=image 49172 udptl t38\r\n"));
+    REQUIRE(r.value.has_value());
+    const auto& m = r.value->mediaDescriptions[0];
+    REQUIRE(m.mediaType == MediaType::IMAGE);
+    REQUIRE(m.rawMediaType.empty());
+    REQUIRE(m.protocol == TransportProtocol::UDPTL);
+    REQUIRE(m.rawProtocol.empty());
+  }
 }
 
 TEST_CASE("parser: recognized secure profiles still map (no fail-safe over-reach)",
@@ -205,13 +227,14 @@ TEST_CASE("parser: a malformed m= section fails the WHOLE offer (no m-line desyn
 TEST_CASE("serializer: UNKNOWN proto/media round-trips the original raw token",
           "[unknown][serializer][round-trip]")
 {
-  const std::string in = withHeader("m=image 49172 udptl t38\r\n");
+  // Genuinely unknown media + proto (image/udptl are recognized as of 2026-09-01-1).
+  const std::string in = withHeader("m=holo 49172 SOME/VENDOR t38\r\n");
   auto parsed = SdpParser::parse(in);
   REQUIRE(parsed.value.has_value());
   auto out = SdpSerializer::serialize(*parsed.value);
 
   // The exact wire tokens, never a "" / "audio" / "UDP" fallback.
-  REQUIRE(out.find("m=image 49172 udptl t38") != std::string::npos);
+  REQUIRE(out.find("m=holo 49172 SOME/VENDOR t38") != std::string::npos);
   REQUIRE(out.find("m= ") == std::string::npos);   // no empty media token
   REQUIRE(out.find(" 49172 \r") == std::string::npos); // no empty proto token
 
@@ -221,17 +244,19 @@ TEST_CASE("serializer: UNKNOWN proto/media round-trips the original raw token",
   REQUIRE(reparsed.value->mediaDescriptions.size() == 1);
   const auto& m = reparsed.value->mediaDescriptions[0];
   REQUIRE(m.mediaType == MediaType::UNKNOWN);
-  REQUIRE(m.rawMediaType == "image");
+  REQUIRE(m.rawMediaType == "holo");
   REQUIRE(m.protocol == TransportProtocol::UNKNOWN);
-  REQUIRE(m.rawProtocol == "udptl");
+  REQUIRE(m.rawProtocol == "SOME/VENDOR");
 }
 
 TEST_CASE("serializer: an UNKNOWN section survives a B2BUA field mutation (proxy "
           "rewrites c=, re-emits the raw proto — no forward-leg downgrade)",
           "[unknown][serializer][round-trip][b2bua]")
 {
+  // Genuinely unregistered secure proto (UDP/TLS/RTP/SAVP is recognized as of
+  // 2026-09-01-1) — an UNKNOWN section must survive a B2BUA rewrite un-downgraded.
   auto parsed = SdpParser::parse(withHeader(
-    "m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n"
+    "m=audio 5004 SOME/VENDOR/SAVP 0\r\n"
     "c=IN IP4 203.0.113.9\r\n"));
   REQUIRE(parsed.value.has_value());
 
@@ -241,14 +266,14 @@ TEST_CASE("serializer: an UNKNOWN section survives a B2BUA field mutation (proxy
   auto out = SdpSerializer::serialize(*parsed.value);
 
   // The secure proto is re-emitted verbatim, NEVER downgraded to RTP/AVP or "".
-  REQUIRE(out.find("m=audio 5004 UDP/TLS/RTP/SAVP 0") != std::string::npos);
+  REQUIRE(out.find("m=audio 5004 SOME/VENDOR/SAVP 0") != std::string::npos);
   REQUIRE(out.find("c=IN IP4 198.51.100.7") != std::string::npos);
 
   auto reparsed = SdpParser::parse(out);
   REQUIRE(reparsed.value.has_value());
   const auto& m = reparsed.value->mediaDescriptions[0];
   REQUIRE(m.protocol == TransportProtocol::UNKNOWN);
-  REQUIRE(m.rawProtocol == "UDP/TLS/RTP/SAVP");
+  REQUIRE(m.rawProtocol == "SOME/VENDOR/SAVP");
 }
 
 // ---------------------------------------------------------------------------
@@ -331,22 +356,38 @@ TEST_CASE("createAnswer: APPLICATION media with UNKNOWN proto -> port-0 (not por
   REQUIRE(ans.mediaDescriptions[0].direction == Direction::INACTIVE);
 }
 
-TEST_CASE("createAnswer: UNKNOWN media type -> port-0",
-          "[unknown][offer_answer][createAnswer]")
+TEST_CASE("createAnswer: recognized-but-unmodelable IMAGE media -> port-0 (PART 2d)",
+          "[unknown][offer_answer][createAnswer][image]")
 {
+  // T.38 fax: image/udptl are recognized as of 2026-09-01-1, so the hasUnknownProfile
+  // guard no longer fires. PART 2d's MEDIA-type reject must still port-0 it (a fax
+  // stream this SDP layer cannot answer) on BOTH the with- and without-supportedCodecs
+  // paths, echoing the recognized IMAGE/UDPTL enums (no raw token).
   auto offer = SdpParser::parse(withHeader("m=image 49172 udptl t38\r\n"));
   REQUIRE(offer.value.has_value());
-  auto ans = OfferAnswer::createAnswer(*offer.value, AnswerOptions{});
-  REQUIRE(ans.mediaDescriptions.size() == 1);
-  REQUIRE(ans.mediaDescriptions[0].port == 0);
-  REQUIRE(ans.mediaDescriptions[0].mediaType == MediaType::UNKNOWN);
-  REQUIRE(ans.mediaDescriptions[0].rawMediaType == "image");
+  REQUIRE(offer.value->mediaDescriptions[0].mediaType == MediaType::IMAGE);
+
+  auto ansNoCodecs = OfferAnswer::createAnswer(*offer.value, AnswerOptions{});
+  REQUIRE(ansNoCodecs.mediaDescriptions.size() == 1);
+  REQUIRE(ansNoCodecs.mediaDescriptions[0].port == 0);
+  REQUIRE(ansNoCodecs.mediaDescriptions[0].direction == Direction::INACTIVE);
+  REQUIRE(ansNoCodecs.mediaDescriptions[0].mediaType == MediaType::IMAGE);
+  REQUIRE(ansNoCodecs.mediaDescriptions[0].rawMediaType.empty());
+
+  AnswerOptions withCodecs;
+  withCodecs.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  auto ansCodecs = OfferAnswer::createAnswer(*offer.value, withCodecs);
+  REQUIRE(ansCodecs.mediaDescriptions.size() == 1);
+  REQUIRE(ansCodecs.mediaDescriptions[0].port == 0); // rejected before codec matching
 }
 
-TEST_CASE("createAnswer: a mixed offer (valid audio + UNKNOWN section) preserves "
+TEST_CASE("createAnswer: a mixed offer (valid audio + T.38 image section) preserves "
           "m-line count and order (RFC 3264 §6 positional correspondence)",
-          "[unknown][offer_answer][createAnswer][positional]")
+          "[unknown][offer_answer][createAnswer][positional][image]")
 {
+  // The everyday "audio + T.38 fax" SDP. image/udptl are recognized (2026-09-01-1)
+  // so section 1 is now MediaType::IMAGE (not UNKNOWN) and is port-0-rejected by
+  // PART 2d — the m-line count and order MUST still be preserved.
   auto offer = SdpParser::parse(
     "v=0\r\n"
     "o=- 1 1 IN IP4 192.0.2.1\r\n"
@@ -354,7 +395,7 @@ TEST_CASE("createAnswer: a mixed offer (valid audio + UNKNOWN section) preserves
     "t=0 0\r\n"
     "m=audio 5004 RTP/AVP 0\r\n"
     "a=rtpmap:0 PCMU/8000\r\n"
-    "m=image 49172 udptl t38\r\n"); // second section is UNKNOWN (media + proto)
+    "m=image 49172 udptl t38\r\n"); // second section: recognized IMAGE/UDPTL, unserviceable
   REQUIRE(offer.value.has_value());
   REQUIRE(offer.value->mediaDescriptions.size() == 2);
 
@@ -366,9 +407,9 @@ TEST_CASE("createAnswer: a mixed offer (valid audio + UNKNOWN section) preserves
   REQUIRE(ans.mediaDescriptions.size() == 2);
   CHECK(ans.mediaDescriptions[0].mediaType == MediaType::AUDIO);
   CHECK(ans.mediaDescriptions[0].port != 0); // audio answered
-  CHECK(ans.mediaDescriptions[1].mediaType == MediaType::UNKNOWN);
-  CHECK(ans.mediaDescriptions[1].rawMediaType == "image");
-  CHECK(ans.mediaDescriptions[1].port == 0); // UNKNOWN rejected
+  CHECK(ans.mediaDescriptions[1].mediaType == MediaType::IMAGE);
+  CHECK(ans.mediaDescriptions[1].rawMediaType.empty()); // recognized: no raw token
+  CHECK(ans.mediaDescriptions[1].port == 0); // T.38 image rejected (PART 2d)
   CHECK(ans.mediaDescriptions[1].direction == Direction::INACTIVE);
 }
 
@@ -426,6 +467,88 @@ TEST_CASE("createAnswer: answering a fmt-less port-0 UNKNOWN removal emits a VAL
   REQUIRE_FALSE(reparsed.value->mediaDescriptions[0].formats.empty());
 }
 
+TEST_CASE("createAnswer: RTP/AVPF offer is accepted and echoes RTP/AVPF (served-as-AVP)",
+          "[unknown][offer_answer][createAnswer][avpf]")
+{
+  // 2026-09-01-1: RTP/AVPF is recognized and answer-serviceable-as-AVP. createAnswer
+  // must accept it (port != 0) and ECHO proto RTP/AVPF (RFC 3264 §8.3.1 — the answer
+  // proto MUST equal the offer proto; a silent downgrade to RTP/AVP would be
+  // non-corresponding). createAnswer is a MEDIA-only gate here — it does not reject
+  // on transport profile.
+  auto offer = SdpParser::parse(withHeader(
+    "m=audio 5004 RTP/AVPF 0\r\n"
+    "a=rtpmap:0 PCMU/8000\r\n"));
+  REQUIRE(offer.value.has_value());
+  REQUIRE(offer.value->mediaDescriptions[0].protocol == TransportProtocol::RTP_AVPF);
+
+  AnswerOptions opts;
+  opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  auto ans = OfferAnswer::createAnswer(*offer.value, opts);
+  REQUIRE(ans.mediaDescriptions.size() == 1);
+  const auto& m = ans.mediaDescriptions[0];
+  CHECK(m.port != 0); // accepted
+  CHECK(m.protocol == TransportProtocol::RTP_AVPF); // echoed, NOT downgraded to RTP/AVP
+}
+
+TEST_CASE("createAnswer: UDP/TLS/RTP/SAVP (DTLS-SRTP) is answered proto-agnostically "
+          "with a fingerprint (createAnswer is NOT gated on transport profile, C2-1)",
+          "[unknown][offer_answer][createAnswer][dtls]")
+{
+  // Recognizing UDP/TLS/RTP/SAVP (2026-09-01-1) changed createAnswer's disposition
+  // from UNKNOWN->port-0 to a normal DTLS-SRTP answer. createAnswer stays TRANSPORT-
+  // PROFILE-agnostic (PART 2d rejects only IMAGE media, inspects no <proto>), so it
+  // answers a DTLS profile at a non-zero port, echoes the proto (RFC 3264 §8.3.1),
+  // and emits a=fingerprint (RFC 5764).
+  auto offer = SdpParser::parse(withHeader(
+    "m=audio 5004 UDP/TLS/RTP/SAVP 0\r\n"
+    "a=rtpmap:0 PCMU/8000\r\n"));
+  REQUIRE(offer.value.has_value());
+  REQUIRE(offer.value->mediaDescriptions[0].protocol ==
+          TransportProtocol::UDP_TLS_RTP_SAVP);
+
+  AnswerOptions opts;
+  opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  opts.fingerprint = FingerprintAttribute{
+    "sha-256",
+    "D1:A2:B3:C4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:"
+    "A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90"};
+
+  auto ans = OfferAnswer::createAnswer(*offer.value, opts);
+  REQUIRE(ans.mediaDescriptions.size() == 1);
+  const auto& m = ans.mediaDescriptions[0];
+  CHECK(m.port != 0); // answered, NOT port-0: createAnswer is proto-agnostic
+  CHECK(m.protocol == TransportProtocol::UDP_TLS_RTP_SAVP); // echoed, not downgraded
+
+  ans.connection = ConnectionData{NetworkType::IN, AddressType::IP4, "192.0.2.9"};
+  auto wire = SdpSerializer::serialize(ans);
+  CHECK(wire.find("a=fingerprint:sha-256") != std::string::npos);
+  CHECK(wire.find("a=setup:active") != std::string::npos); // RFC 5763 §5 setup role
+}
+
+TEST_CASE("parser: scoped-out real IANA tokens (TCP/*, DCCP/*) stay UNKNOWN + raw "
+          "round-trip (2026-09-01-1 recognized only the minimal set)",
+          "[unknown][parser][proto][scoped-out]")
+{
+  // Registered IANA proto tokens (RFC 4571/7850 TCP, RFC 5762/5764 DCCP) that were
+  // DELIBERATELY not recognized: permanently unserviceable on a UDP RTP engine, so
+  // they stay UNKNOWN and take the fail-safe port-0 reject, round-tripping the raw
+  // token. Pins the scope-out so a future accidental table addition trips a test.
+  for (const char* token : {"TCP/RTP/AVP", "TCP/DTLS/RTP/SAVPF",
+                            "DCCP/RTP/AVP", "DCCP/TLS/RTP/SAVP"})
+  {
+    auto r = SdpParser::parse(
+      withHeader(std::string("m=audio 5004 ") + token + " 0\r\n"));
+    REQUIRE(r.value.has_value());
+    const auto& m = r.value->mediaDescriptions[0];
+    CHECK(m.protocol == TransportProtocol::UNKNOWN);
+    CHECK(m.rawProtocol == token); // exact spelling preserved
+
+    auto out = SdpSerializer::serialize(*r.value);
+    CHECK(out.find(std::string("m=audio 5004 ") + token + " 0") !=
+          std::string::npos);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Phase 4 — createOffer never emits UNKNOWN (pins the "never offer UNKNOWN"
 // invariant the iora_media gate asserts on its offer operand).
@@ -443,6 +566,7 @@ TEST_CASE("createOffer never emits UNKNOWN proto/media",
   for (const auto& m : offer.mediaDescriptions)
   {
     REQUIRE(m.mediaType != MediaType::UNKNOWN);
+    REQUIRE(m.mediaType != MediaType::IMAGE); // never offer T.38 (F-5 invariant)
     REQUIRE(m.protocol != TransportProtocol::UNKNOWN);
     REQUIRE(m.rawMediaType.empty());
     REQUIRE(m.rawProtocol.empty());

@@ -22,16 +22,20 @@ TEST_CASE("MediaType: toString produces correct wire strings", "[types][MediaTyp
   REQUIRE(toString(MediaType::APPLICATION) == "application");
   REQUIRE(toString(MediaType::TEXT) == "text");
   REQUIRE(toString(MediaType::MESSAGE) == "message");
+  REQUIRE(toString(MediaType::IMAGE) == "image");
 }
 
-TEST_CASE("MediaType: fromString round-trip", "[types][MediaType]")
+// Single-source, table-driven: iterates kAllMediaTypes (the real member set, not
+// a hand-copied literal), so a new member added without a toString/fromString arm
+// is caught here — the static_assert in types.hpp pins the array to the enum.
+TEST_CASE("MediaType: fromString/toString round-trip for every member", "[types][MediaType]")
 {
-  auto values = {"audio", "video", "application", "text", "message"};
-  for (auto s : values)
+  for (const auto& [member, canonical] : kAllMediaTypes)
   {
-    auto v = mediaTypeFromString(s);
+    auto v = mediaTypeFromString(std::string(canonical));
     REQUIRE(v.has_value());
-    REQUIRE(toString(*v) == s);
+    REQUIRE(*v == member);
+    REQUIRE(toString(member) == canonical);
   }
 }
 
@@ -40,6 +44,7 @@ TEST_CASE("MediaType: fromString is case-insensitive", "[types][MediaType]")
   REQUIRE(mediaTypeFromString("AUDIO") == MediaType::AUDIO);
   REQUIRE(mediaTypeFromString("Audio") == MediaType::AUDIO);
   REQUIRE(mediaTypeFromString("VIDEO") == MediaType::VIDEO);
+  REQUIRE(mediaTypeFromString("IMAGE") == MediaType::IMAGE);
 }
 
 TEST_CASE("MediaType: fromString invalid returns nullopt", "[types][MediaType]")
@@ -68,30 +73,37 @@ TEST_CASE("TransportProtocol: underscore-to-slash mapping", "[types][TransportPr
 {
   REQUIRE(toString(TransportProtocol::UDP) == "UDP");
   REQUIRE(toString(TransportProtocol::RTP_AVP) == "RTP/AVP");
+  REQUIRE(toString(TransportProtocol::RTP_AVPF) == "RTP/AVPF");
   REQUIRE(toString(TransportProtocol::RTP_SAVP) == "RTP/SAVP");
   REQUIRE(toString(TransportProtocol::RTP_SAVPF) == "RTP/SAVPF");
+  REQUIRE(toString(TransportProtocol::UDP_TLS_RTP_SAVP) == "UDP/TLS/RTP/SAVP");
   REQUIRE(toString(TransportProtocol::UDP_TLS_RTP_SAVPF) == "UDP/TLS/RTP/SAVPF");
   REQUIRE(toString(TransportProtocol::DTLS_SCTP) == "DTLS/SCTP");
   REQUIRE(toString(TransportProtocol::UDP_DTLS_SCTP) == "UDP/DTLS/SCTP");
   REQUIRE(toString(TransportProtocol::TCP_DTLS_SCTP) == "TCP/DTLS/SCTP");
+  REQUIRE(toString(TransportProtocol::UDPTL) == "udptl");
 }
 
-TEST_CASE("TransportProtocol: fromString round-trip", "[types][TransportProtocol]")
+// Single-source, table-driven over kAllTransportProtocols (see the MediaType twin).
+TEST_CASE("TransportProtocol: fromString/toString round-trip for every member",
+          "[types][TransportProtocol]")
 {
-  auto values = {"UDP", "RTP/AVP", "RTP/SAVP", "RTP/SAVPF",
-                 "UDP/TLS/RTP/SAVPF", "DTLS/SCTP", "UDP/DTLS/SCTP", "TCP/DTLS/SCTP"};
-  for (auto s : values)
+  for (const auto& [member, canonical] : kAllTransportProtocols)
   {
-    auto v = transportProtocolFromString(s);
+    auto v = transportProtocolFromString(std::string(canonical));
     REQUIRE(v.has_value());
-    REQUIRE(toString(*v) == s);
+    REQUIRE(*v == member);
+    REQUIRE(toString(member) == canonical);
   }
 }
 
 TEST_CASE("TransportProtocol: fromString is case-insensitive", "[types][TransportProtocol]")
 {
   REQUIRE(transportProtocolFromString("rtp/avp") == TransportProtocol::RTP_AVP);
+  REQUIRE(transportProtocolFromString("rtp/avpf") == TransportProtocol::RTP_AVPF);
+  REQUIRE(transportProtocolFromString("udp/tls/rtp/savp") == TransportProtocol::UDP_TLS_RTP_SAVP);
   REQUIRE(transportProtocolFromString("udp/tls/rtp/savpf") == TransportProtocol::UDP_TLS_RTP_SAVPF);
+  REQUIRE(transportProtocolFromString("UDPTL") == TransportProtocol::UDPTL);
 }
 
 TEST_CASE("TransportProtocol: fromString invalid returns nullopt", "[types][TransportProtocol]")

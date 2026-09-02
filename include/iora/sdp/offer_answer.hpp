@@ -667,10 +667,25 @@ struct OfferAnswer
       // malformed (UNKNOWN) is rejected with port 0 BEFORE the declined/
       // APPLICATION/RTP dispatch — no arm may accept (port=9) a media type or
       // transport profile we cannot faithfully model. Placed pre-dispatch so it
-      // covers the APPLICATION arm too (RFC 3264 §6: reject unsupported streams;
-      // RFC 4568 §7.1: never answer an unsupported secure profile). Echo the exact
-      // wire token so the rejected m= line round-trips (never a "" toString).
+      // covers the APPLICATION arm too (RFC 3264 §6/§8.2: reject an unsupported
+      // stream with port 0). Echo the exact wire token so the rejected m= line
+      // round-trips (never a "" toString).
       if (offerMedia.hasUnknownProfile())
+      {
+        session.mediaDescriptions.push_back(rejectEcho(offerMedia));
+        continue;
+      }
+
+      // FAIL-SAFE (2026-09-01-1 PART 2d): a RECOGNIZED but unmodelable MEDIA type
+      // (T.38 fax, m=image) is likewise port-0-rejected before dispatch. Recognizing
+      // IMAGE (types.hpp) removes it from the hasUnknownProfile() guard above, so
+      // without this clause an m=image offer would fall through to the RTP else-arm
+      // and be accepted at port 9 — a fax stream this SDP layer cannot answer. This
+      // is a MEDIA-type reject ONLY: it inspects no <proto>, so createAnswer stays
+      // transport-profile-agnostic and keeps answering DTLS-SRTP (UDP/TLS/RTP/SAVP[F])
+      // with a fingerprint (that serviceability decision belongs to the media plane,
+      // not this generic primitive).
+      if (offerMedia.mediaType == MediaType::IMAGE)
       {
         session.mediaDescriptions.push_back(rejectEcho(offerMedia));
         continue;
