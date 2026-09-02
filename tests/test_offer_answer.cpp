@@ -2472,3 +2472,196 @@ TEST_CASE("createAnswer: non-BUNDLE-aware — no a=group emitted",
     REQUIRE(parsed.value->mediaDescriptions.size() == answer.mediaDescriptions.size());
   }
 }
+
+// ---------------------------------------------------------------------------
+// T10: createOffer scaffold formats contract + serializer active-empty guard
+// (tracker 2026-07-25-4). createOffer scaffolds RTP sections WITHOUT formats;
+// the caller must populate them. An active (port != 0) empty-formats section is
+// rendered as a REJECTED stream (port 0) by the serializer rather than
+// advertising a placeholder codec on a live line.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("createOffer scaffold leaves RTP formats empty (contract)",
+          "[offer_answer][offer][formats]")
+{
+  SECTION("E.1 default: audio and video formats are empty, data channel is not")
+  {
+    OfferOptions opts;
+    opts.dataChannel = true;
+    auto offer = OfferAnswer::createOffer(opts);
+    REQUIRE(offer.mediaDescriptions.size() == 3);
+    // RTP sections: caller must populate (mutation: seeding a format fails this).
+    REQUIRE(offer.mediaDescriptions[0].mediaType == MediaType::AUDIO);
+    REQUIRE(offer.mediaDescriptions[0].formats.empty());
+    REQUIRE(offer.mediaDescriptions[1].mediaType == MediaType::VIDEO);
+    REQUIRE(offer.mediaDescriptions[1].formats.empty());
+    // Data channel is self-complete.
+    REQUIRE(offer.mediaDescriptions[2].formats == std::vector<std::string>{"webrtc-datachannel"});
+  }
+
+  SECTION("E.1 audio-only and video-only scaffolds leave formats empty")
+  {
+    OfferOptions audioOnly;
+    audioOnly.video = false;
+    auto a = OfferAnswer::createOffer(audioOnly);
+    REQUIRE(a.mediaDescriptions.size() == 1);
+    REQUIRE(a.mediaDescriptions[0].mediaType == MediaType::AUDIO);
+    REQUIRE(a.mediaDescriptions[0].formats.empty());
+
+    OfferOptions videoOnly;
+    videoOnly.audio = false;
+    auto v = OfferAnswer::createOffer(videoOnly);
+    REQUIRE(v.mediaDescriptions.size() == 1);
+    REQUIRE(v.mediaDescriptions[0].mediaType == MediaType::VIDEO);
+    REQUIRE(v.mediaDescriptions[0].formats.empty());
+  }
+}
+
+TEST_CASE("createOffer populated then serialized is valid SDP",
+          "[offer_answer][offer][serialize]")
+{
+  SECTION("E.2 populate both sections -> exact m= lines, reparses")
+  {
+    auto offer = OfferAnswer::createOffer();
+    offer.mediaDescriptions[0].rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    offer.mediaDescriptions[0].formats.push_back("111");
+    offer.mediaDescriptions[1].rtpMaps.push_back({96, "VP8", 90000, {}});
+    offer.mediaDescriptions[1].formats.push_back("96");
+
+    const std::string sdp = SdpSerializer::serialize(offer);
+    // Line-scoped exact assertions (NOT a whole-body find(" 0"), which would
+    // false-match "t=0 0").
+    REQUIRE(sdp.find("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n") != std::string::npos);
+    REQUIRE(sdp.find("m=video 9 UDP/TLS/RTP/SAVPF 96\r\n") != std::string::npos);
+    // No line rendered rejected.
+    REQUIRE(sdp.find("m=audio 0 ") == std::string::npos);
+    REQUIRE(sdp.find("m=video 0 ") == std::string::npos);
+
+    auto parsed = SdpParser::parse(sdp);
+    REQUIRE(parsed.hasValue());
+  }
+}
+
+TEST_CASE("serializer renders an active empty-formats section as rejected",
+          "[offer_answer][serialize][guard]")
+{
+  SECTION("E.3 serialize(createOffer()) default -> both RTP lines port 0")
+  {
+    const std::string sdp = SdpSerializer::serialize(OfferAnswer::createOffer());
+    // Guard core: active (port 9) empty-formats scaffold coerced to port 0.
+    // MUTATION: emitting the original port 9 would fail these exact-line asserts.
+    const auto audioPos = sdp.find("m=audio 0 UDP/TLS/RTP/SAVPF 0\r\n");
+    REQUIRE(audioPos != std::string::npos);
+    REQUIRE(sdp.find("m=video 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+    // The scaffold did NOT emit an active (port 9) line advertising PT 0.
+    REQUIRE(sdp.find("m=audio 9 ") == std::string::npos);
+    REQUIRE(sdp.find("m=video 9 ") == std::string::npos);
+    // a=mid retained (RFC 8843 keeps mid on rejected members).
+    REQUIRE(sdp.find("a=mid:0\r\n") != std::string::npos);
+    REQUIRE(sdp.find("a=mid:1\r\n") != std::string::npos);
+    // Only the port token is coerced: direction is left as-is (a=sendrecv on a
+    // port-0 line; harmless but documented, not the a=inactive idiom). Scope the
+    // assertion to the rejected audio block: a=sendrecv must appear after the
+    // m=audio 0 line and before the next m= line.
+    const auto nextMPos = sdp.find("\r\nm=", audioPos + 1);
+    const auto sendrecvPos = sdp.find("a=sendrecv\r\n", audioPos);
+    REQUIRE(sendrecvPos != std::string::npos);
+    REQUIRE(sendrecvPos < nextMPos);
+
+    auto parsed = SdpParser::parse(sdp);
+    REQUIRE(parsed.hasValue());
+  }
+
+  SECTION("E.5 guard fires on an active empty-formats section (unit)")
+  {
+    MediaDescription md;
+    md.mediaType = MediaType::AUDIO;
+    md.port = 9; // ACTIVE + empty formats -> coerced to 0
+    md.protocol = TransportProtocol::UDP_TLS_RTP_SAVPF;
+    const std::string section = SdpSerializer::serializeMediaSection(md);
+    REQUIRE(section.find("m=audio 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+  }
+
+  SECTION("E.4 legitimate port-0 removal is unchanged (over-fix guard)")
+  {
+    MediaDescription md;
+    md.mediaType = MediaType::AUDIO;
+    md.port = 0; // already rejected: guard must NOT be the reason for the ' 0'
+    md.protocol = TransportProtocol::UDP_TLS_RTP_SAVPF;
+    const std::string section = SdpSerializer::serializeMediaSection(md);
+    REQUIRE(section.find("m=audio 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+    auto parsed = SdpParser::parse(
+        "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n" + section);
+    REQUIRE(parsed.hasValue());
+  }
+
+  SECTION("E.7 default createOffer BUNDLE: group retained, both members port 0")
+  {
+    // This is the RFC 8843 §7.2.1-NONCONFORMANT black-hole rendering (the suggested
+    // offerer-tagged m= section ends up zero-port): documented misuse output, NOT a
+    // valid BUNDLE offer. The serializer is deliberately not BUNDLE-aware.
+    const std::string sdp = SdpSerializer::serialize(OfferAnswer::createOffer());
+    REQUIRE(sdp.find("a=group:BUNDLE 0 1\r\n") != std::string::npos);
+    REQUIRE(sdp.find("m=audio 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+    REQUIRE(sdp.find("m=video 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+  }
+
+  SECTION("E.8 data channel section never hits the guard")
+  {
+    OfferOptions opts;
+    opts.audio = false;
+    opts.video = false;
+    opts.dataChannel = true;
+    const std::string sdp = SdpSerializer::serialize(OfferAnswer::createOffer(opts));
+    REQUIRE(sdp.find("webrtc-datachannel") != std::string::npos);
+    REQUIRE(sdp.find("m=application 0 ") == std::string::npos);
+  }
+
+  SECTION("E.9 mixed partial population: audio active, video rejected")
+  {
+    auto offer = OfferAnswer::createOffer();
+    offer.mediaDescriptions[0].rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    offer.mediaDescriptions[0].formats.push_back("111");
+    // video left unpopulated on purpose
+    const std::string sdp = SdpSerializer::serialize(offer);
+    // Audio stays active (a surviving non-zero-port tag, so this avoids E.7's
+    // all-zero §7.2.1 defect); video rendered rejected.
+    REQUIRE(sdp.find("m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n") != std::string::npos);
+    REQUIRE(sdp.find("m=video 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+    // No PCMU-on-video: the active video line advertising PT 0 must not appear.
+    REQUIRE(sdp.find("m=video 9 ") == std::string::npos);
+    // The group is still RFC 8843 §7.5.3-NONCONFORMANT: the serializer is not
+    // BUNDLE-aware, so the disabled member's mid (1) is NOT stripped from the group.
+    REQUIRE(sdp.find("a=group:BUNDLE 0 1\r\n") != std::string::npos);
+  }
+}
+
+TEST_CASE("createAnswer formats contract differs from createOffer",
+          "[offer_answer][answer][formats]")
+{
+  SECTION("E.6a createAnswer of a well-formed parsed offer -> active fmt present")
+  {
+    auto offerRes = SdpParser::parse(
+        "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n"
+        "m=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n");
+    REQUIRE(offerRes.hasValue());
+    auto answer = OfferAnswer::createAnswer(*offerRes.value);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    // Echoed from the offer -> active answer section carries >=1 fmt.
+    REQUIRE_FALSE(answer.mediaDescriptions[0].formats.empty());
+  }
+
+  SECTION("E.6b createAnswer of an unpopulated createOffer scaffold propagates empty")
+  {
+    OfferOptions opts;
+    opts.video = false; // single section keeps the assertion crisp
+    auto scaffold = OfferAnswer::createOffer(opts);
+    REQUIRE(scaffold.mediaDescriptions[0].formats.empty());
+    auto answer = OfferAnswer::createAnswer(scaffold);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    REQUIRE(answer.mediaDescriptions[0].formats.empty());
+    // Serializes as rejected, not as an active PT-0 advertisement.
+    const std::string sdp = SdpSerializer::serialize(answer);
+    REQUIRE(sdp.find("m=audio 0 UDP/TLS/RTP/SAVPF 0\r\n") != std::string::npos);
+  }
+}

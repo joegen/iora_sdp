@@ -381,6 +381,7 @@ TEST_CASE("Serializer: Media without numberOfPorts", "[serializer]")
   media.mediaType = MediaType::AUDIO;
   media.protocol = TransportProtocol::RTP_AVP;
   media.port = 5004;
+  media.formats = {"0"}; // active section must carry a fmt (else rendered rejected)
   session.mediaDescriptions.push_back(media);
   auto sdp = SdpSerializer::serialize(session);
   auto mLine = sdp.find("m=audio 5004 RTP/AVP");

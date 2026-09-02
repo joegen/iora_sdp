@@ -523,27 +523,44 @@ inline std::string serializeMediaLevel(
   const std::string protoToken = (media.protocol == TransportProtocol::UNKNOWN)
       ? media.rawProtocol
       : std::string(toString(media.protocol));
-  result += "m=" + mediaToken + " " + std::to_string(media.port);
+  // Guard: an ACTIVE (port != 0) section with an empty formats list is a caller
+  // precondition violation — an unpopulated createOffer/createAnswer scaffold
+  // (createOffer leaves the audio/video formats empty for the caller to fill;
+  // createAnswer's capability-blind fallback echoes an empty offer section). Rather
+  // than emit the placeholder as a live codec (advertising static PT 0 = PCMU on an
+  // active audio line, or an audio PT on a video line), RENDER THE SECTION AS
+  // REJECTED (port 0) — RFC 3264 §5.1 (a zero port in an offer means the stream is
+  // offered but MUST NOT be used) / §8.2 (a stream is removed by setting its port to
+  // zero) / §6 (an answer rejects a stream with a zero port). RFC 4566 §5.14 is the
+  // grammar basis for still emitting one fmt token, not the port-0 semantics. Only
+  // the port token is coerced — numberOfPorts, c=, a=rtcp, a=mid and direction are
+  // left as the caller set them, so a rejected line may still carry a=sendrecv
+  // (harmless at port 0 where direction is moot, though not the a=inactive idiom).
+  // This keeps serialize() total and non-throwing. NOTE: for the default
+  // createOffer() (audio+video+bundle) both members render port 0, yielding an
+  // RFC 8843 §7.2.1-nonconformant BUNDLE offer (the suggested offerer-tagged m=
+  // section ends up zero-port) — an honest fail-safe rendering of a documented
+  // misuse, not a conformant offer; the serializer is deliberately NOT
+  // BUNDLE-group-aware (so a disabled member's mid is not stripped from the group
+  // per RFC 8843 §7.5.3 either).
+  const bool emptyFormats = media.formats.empty();
+  const bool renderRejected = emptyFormats && media.port != 0;
+  const std::uint16_t effectivePort =
+      renderRejected ? std::uint16_t{0} : media.port;
+  result += "m=" + mediaToken + " " + std::to_string(effectivePort);
   if (media.numberOfPorts.has_value())
   {
     result += "/" + std::to_string(*media.numberOfPorts);
   }
   result += " " + protoToken;
-  if (media.formats.empty())
+  if (emptyFormats)
   {
-    // RFC 4566 §5.14 mandates 1*(SP fmt) on EVERY m= line, and RFC 3264 §6
-    // requires at least one even for a rejected/removed (port-0) stream — where
-    // the format is ignored. The parser is receive-liberal (it tolerates a
-    // fmt-less port-0 removal on the wire), but we must be emit-conservative:
-    // substitute a single placeholder so a strict receiver/SBC does not reject
-    // the whole body. The ONLY empty-formats section reachable via supported
-    // paths is a port-0 removal (the parser rejects an ACTIVE fmt-less line, and
-    // every createOffer/createAnswer builder sets a non-empty formats list for an
-    // active section), where the placeholder's value is ignored per RFC 3264 §6 —
-    // so this never advertises an un-offered codec on a live stream. An active
-    // empty-formats section is only reachable by directly hand-building an invalid
-    // MediaDescription (a caller precondition violation); the placeholder there is
-    // grammar-salvage, not a real codec offer.
+    // Two reachable empty-formats paths, both rendered as a port-0 rejected stream
+    // by the time we reach here: (i) a legitimate port-0 removal (port was already
+    // 0 — the createAnswer rejectEcho path); (ii) the active scaffold coerced to 0
+    // by the guard above. RFC 4566 §5.14 mandates 1*(SP fmt) on every m= line, so
+    // emit a single placeholder; its value is ignored on a port-0 stream (RFC 3264
+    // §5.1/§8.2/§6), so it never advertises an un-offered codec on a live one.
     result += " 0";
   }
   else

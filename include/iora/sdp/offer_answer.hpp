@@ -646,6 +646,22 @@ struct OfferAnswer
   /// The connection address is the caller's to supply: no c= is set at either
   /// level, so the result is incomplete per RFC 4566 §5.7 until the caller
   /// assigns one (see SessionDescription::effectiveConnection).
+  ///
+  /// Likewise the RTP media sections (audio/video) are scaffolded WITHOUT any
+  /// formats/rtpMaps: the caller MUST populate each active RTP section's `formats`
+  /// (and matching `a=rtpmap` for dynamic PTs) before serializing. The data-channel
+  /// section is exempt — it is self-complete (`formats = {"webrtc-datachannel"}`).
+  /// If an active RTP section is serialized with an empty formats list, the
+  /// serializer renders it as a REJECTED stream (port 0) rather than advertising a
+  /// placeholder codec (RFC 3264 §5.1/§8.2/§6) — a SILENT coercion, since
+  /// serialize() gives no error signal. In particular, serializing an unpopulated
+  /// createOffer() with `bundlePolicy = true` (the default) yields a NON-CONFORMANT
+  /// BUNDLE offer (RFC 8843 §7.2.1: the suggested offerer-tagged m= section ends up
+  /// zero-port). Contrast with
+  /// createAnswer, whose contract differs: it ECHOES the offer's fmt list rather
+  /// than requiring the caller to populate — but feeding it an unpopulated
+  /// createOffer scaffold propagates the empty formats and is likewise rendered
+  /// rejected.
   static SessionDescription createOffer(const OfferOptions& options = {})
   {
     SessionDescription session;

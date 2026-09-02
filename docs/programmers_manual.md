@@ -1896,7 +1896,7 @@ offerOpts.video = true;
 offerOpts.dataChannel = true;
 auto offer = OfferAnswer::createOffer(offerOpts);
 
-// 2. Add codecs to audio section
+// 2. Add codecs to the audio section
 auto* audio = OfferAnswer::findMediaByMid(offer, "0");
 RtpMapAttribute opus;
 opus.payloadType = 111;
@@ -1905,6 +1905,18 @@ opus.clockRate = 48000;
 opus.channels = 2;
 audio->rtpMaps.push_back(opus);
 audio->formats.push_back("111");
+
+// 2b. Add a codec to the video section too. createOffer scaffolds each RTP
+// media section WITHOUT formats — every active section the caller intends to
+// offer must be populated, or the serializer renders it as a rejected stream
+// (port 0). A dynamic PT (96-127) requires a matching a=rtpmap (RFC 4566 §6).
+auto* video = OfferAnswer::findMediaByMid(offer, "1");
+RtpMapAttribute vp8;
+vp8.payloadType = 96;
+vp8.encodingName = "VP8";
+vp8.clockRate = 90000;
+video->rtpMaps.push_back(vp8);
+video->formats.push_back("96");
 
 // 3. Serialize offer and send via signaling
 auto offerSdp = SdpSerializer::serialize(offer);
