@@ -224,7 +224,7 @@ TEST_CASE("WebRTC: Chrome M120+ Unified Plan offer", "[webrtc_sdp]")
 
 static const char* kFirefoxSdp =
   "v=0\r\n"
-  "o=mozilla...THIS_IS_SDPARTA-99.0 820location969135location3 0 IN IP4 0.0.0.0\r\n"
+  "o=mozilla...THIS_IS_SDPARTA-99.0 8209691353 0 IN IP4 0.0.0.0\r\n"
   "s=-\r\n"
   "t=0 0\r\n"
   "a=fingerprint:sha-256 A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:A1:B2:C3:D4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90\r\n"
@@ -366,7 +366,7 @@ TEST_CASE("WebRTC: Firefox offer", "[webrtc_sdp]")
 
 static const char* kSafariSdp =
   "v=0\r\n"
-  "o=- 2846374location985 2 IN IP4 127.0.0.1\r\n"
+  "o=- 2846374985 2 IN IP4 127.0.0.1\r\n"
   "s=-\r\n"
   "t=0 0\r\n"
   "a=ice-options:trickle\r\n"

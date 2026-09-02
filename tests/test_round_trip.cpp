@@ -82,7 +82,7 @@ TEST_CASE("Round-trip: full WebRTC audio+video SDP", "[round_trip]")
 {
   roundTrip(
     "v=0\r\n"
-    "o=- 4962location303286location9location IN IP4 0.0.0.0\r\n"
+    "o=- 4962303286 9 IN IP4 0.0.0.0\r\n"
     "s=-\r\n"
     "t=0 0\r\n"
     "a=ice-ufrag:abcd1234\r\n"
@@ -1064,4 +1064,45 @@ TEST_CASE("Round-trip: IPv6 multicast address count", "[round_trip]")
 
   const auto reserialized = SdpSerializer::serialize(*parsed.value);
   CHECK(reserialized.find("c=IN IP6 FF15::101/3\r\n") != std::string::npos);
+}
+
+TEST_CASE("Round-trip: absent origin emits no o= and re-parse rejects it (D5)",
+          "[round_trip][origin]")
+{
+  // requireOrigin=false lets a no-o= SDP parse with origin left nullopt.
+  SdpParserOptions opts;
+  opts.requireOrigin = false;
+  auto parsed = SdpParser::parse("v=0\r\ns=-\r\nt=0 0\r\n", opts);
+  REQUIRE(parsed.hasValue());
+  REQUIRE(!parsed.value->origin.has_value());
+
+  // Serializer is total/non-throwing and emits NO o= line (honest, but
+  // intentionally RFC 4566 5.2-nonconformant — no default is synthesized).
+  const auto out = SdpSerializer::serialize(*parsed.value);
+  // Line-anchored: no line begins with "o=" (a bare find("o=") could match a
+  // substring inside another line's value).
+  REQUIRE(out.rfind("o=", 0) != 0);          // not the first line
+  REQUIRE(out.find("\r\no=") == std::string::npos); // nor any later line
+
+  // Re-parsing under DEFAULT options (requireOrigin=true) rejects the body.
+  auto reparsed = SdpParser::parse(out);
+  REQUIRE(!reparsed.hasValue());
+  REQUIRE(reparsed.error->message.find("Missing required o= line")
+          != std::string::npos);
+}
+
+TEST_CASE("Round-trip: exotic origin address preserved verbatim (FQDN, IPv6 literal)",
+          "[round_trip][origin]")
+{
+  for (const std::string addr : {"host.example.com", "2001:db8::dead:beef"})
+  {
+    const std::string sdp =
+      "v=0\r\no=- 7 7 IN IP4 " + addr + "\r\ns=-\r\nt=0 0\r\n";
+    auto parsed = SdpParser::parse(sdp);
+    REQUIRE(parsed.hasValue());
+    REQUIRE(parsed.value->origin.has_value());
+    REQUIRE(parsed.value->origin->address == addr);
+    const auto out = SdpSerializer::serialize(*parsed.value);
+    REQUIRE(out.find("o=- 7 7 IN IP4 " + addr + "\r\n") != std::string::npos);
+  }
 }

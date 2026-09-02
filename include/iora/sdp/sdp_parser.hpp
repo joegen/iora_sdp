@@ -278,27 +278,103 @@ inline std::pair<std::string_view, std::string_view> splitAttrNameValue(std::str
   return {attrLine.substr(0, colon), attrLine.substr(colon + 1)};
 }
 
-inline Origin parseOrigin(std::string_view value)
+/// Discriminated result of parsing an o= value (RFC 4566 §5.2).
+///
+/// parseOrigin does NOT fabricate on failure. NetworkType/AddressType have
+/// value-defaults (IN/IP4), so the older `if (auto x = fromString(s)) field=*x;`
+/// idiom silently coerced an unrecognised token to that default — a value the
+/// no-fabrication contract forbids. Instead every failure class returns an
+/// engaged `error` (and no `value`), letting the o= dispatch reject a
+/// present-but-malformed MANDATORY line at the line where it occurs.
+///
+/// Failure classes (RFC 4566 §5.2 = exactly six fields
+/// `username sess-id sess-version nettype addrtype unicast-address`; the
+/// unicast-address is a single opaque token — FQDN legal, no family sub-grammar,
+/// so it is NOT validated against the addrtype):
+///   MalformedFields    — too few fields, a surplus 7th token, or a non-numeric
+///                        sess-id / sess-version (RFC 4566 §9: both are 1*DIGIT).
+///   UnsupportedNetType — a well-formed but unmodeled nettype (only IN modeled;
+///                        e.g. RFC 2848 PINT `TN`, RFC 3108 `ATM`). Rejected
+///                        wholesale rather than coerced — offendingToken carries
+///                        the raw token for the diagnostic.
+///   UnsupportedAddrType— a well-formed but unmodeled addrtype (only IP4/IP6).
+/// nettype is checked before addrtype, so a doubly-unmodeled `TN RFC2543`
+/// reports the first offending token `TN`.
+struct OriginParse
 {
-  Origin o;
+  enum class Error
+  {
+    None,
+    MalformedFields,
+    UnsupportedNetType,
+    UnsupportedAddrType
+  };
+  std::optional<Origin> value;      ///< Engaged on success only.
+  Error error = Error::None;        ///< Failure class (None on success).
+  std::string offendingToken;       ///< Raw unmodeled token, for the diagnostic.
+};
+
+/// True iff `s` is a non-empty run of ASCII digits (RFC 4566 §9 `1*DIGIT`).
+inline bool isAllDigits(const std::string& s)
+{
+  if (s.empty())
+  {
+    return false;
+  }
+  for (char c : s)
+  {
+    if (c < '0' || c > '9')
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline OriginParse parseOrigin(std::string_view value)
+{
   std::istringstream iss{std::string(value)};
   std::string username, sessId, sessVersion, netTypeStr, addrTypeStr, address;
-  if (iss >> username >> sessId >> sessVersion >> netTypeStr >> addrTypeStr >> address)
+  if (!(iss >> username >> sessId >> sessVersion >> netTypeStr >> addrTypeStr
+            >> address))
   {
-    o.username = username;
-    o.sessId = sessId;
-    o.sessVersion = sessVersion;
-    if (auto nt = networkTypeFromString(netTypeStr))
-    {
-      o.netType = *nt;
-    }
-    if (auto at = addressTypeFromString(addrTypeStr))
-    {
-      o.addrType = *at;
-    }
-    o.address = address;
+    return {std::nullopt, OriginParse::Error::MalformedFields, {}};
   }
-  return o;
+
+  // §5.2 defines exactly six subfields; a surplus token is malformed.
+  std::string surplus;
+  if (iss >> surplus)
+  {
+    return {std::nullopt, OriginParse::Error::MalformedFields, {}};
+  }
+
+  // §9 ABNF: sess-id and sess-version are 1*DIGIT. Reject a non-numeric value
+  // rather than preserve it — §5.2 field 2/3, checked before the type tokens so
+  // the earliest malformed field is reported.
+  if (!isAllDigits(sessId) || !isAllDigits(sessVersion))
+  {
+    return {std::nullopt, OriginParse::Error::MalformedFields, {}};
+  }
+
+  auto nt = networkTypeFromString(netTypeStr);
+  if (!nt)
+  {
+    return {std::nullopt, OriginParse::Error::UnsupportedNetType, netTypeStr};
+  }
+  auto at = addressTypeFromString(addrTypeStr);
+  if (!at)
+  {
+    return {std::nullopt, OriginParse::Error::UnsupportedAddrType, addrTypeStr};
+  }
+
+  Origin o;
+  o.username = username;
+  o.sessId = sessId;
+  o.sessVersion = sessVersion;
+  o.netType = *nt;
+  o.addrType = *at;
+  o.address = address;
+  return {std::move(o), OriginParse::Error::None, {}};
 }
 
 /// Parses a c= value (RFC 4566 §5.7) into ConnectionData.
@@ -1527,9 +1603,61 @@ inline ParseResult<SessionDescription> doParse(
           }
           break;
         case 'o':
+        {
+          // RFC 4566 §5.2 permits exactly one o=. Guard the duplicate BEFORE
+          // parsing, keyed on hasOrigin (set only on a successful parse below),
+          // so a second o= is rejected as a duplicate rather than re-parsed.
+          if (hasOrigin)
+          {
+            if (options.strict)
+            {
+              result.value.reset();
+              result.error = ParseError{lineNum, "Duplicate o= line"};
+              return result;
+            }
+            result.warnings.push_back(
+              {lineNum, "Duplicate o= line, keeping the first"});
+            break;
+          }
+          auto parsed = parseOrigin(val);
+          if (parsed.error != OriginParse::Error::None)
+          {
+            std::string msg;
+            switch (parsed.error)
+            {
+              case OriginParse::Error::MalformedFields:
+                msg = "Malformed o= line: expected 6 fields (RFC 4566 5.2)";
+                break;
+              case OriginParse::Error::UnsupportedNetType:
+                msg = "Unsupported origin network type '" + parsed.offendingToken
+                    + "' (RFC 4566 5.2; only IN modeled)";
+                break;
+              case OriginParse::Error::UnsupportedAddrType:
+                msg = "Unsupported origin address type '" + parsed.offendingToken
+                    + "' (RFC 4566 5.2; only IP4/IP6 modeled)";
+                break;
+              case OriginParse::Error::None:
+                break;
+            }
+            // A present-but-malformed MANDATORY line: reject at the dispatch site
+            // with the real cause and line. In lenient mode this stays fatal
+            // whenever o= is required (parity with strict, and so the diagnostic
+            // is the real cause rather than the presence gate's line-0 "Missing
+            // required o= line"). Only when o= is NOT required is it skipped,
+            // leaving origin unset (see requireOrigin gate below).
+            if (options.strict || options.requireOrigin)
+            {
+              result.value.reset();
+              result.error = ParseError{lineNum, msg};
+              return result;
+            }
+            result.warnings.push_back({lineNum, msg + ", skipping"});
+            break;
+          }
+          session.origin = std::move(parsed.value);
           hasOrigin = true;
-          session.origin = parseOrigin(val);
           break;
+        }
         case 's':
           hasSessionName = true;
           session.sessionName = std::string(val);

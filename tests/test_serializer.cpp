@@ -13,6 +13,7 @@ using namespace iora::sdp;
 TEST_CASE("Serializer: Minimal SessionDescription", "[serializer]")
 {
   SessionDescription session;
+  session.origin.emplace(); // optional<Origin>: a serializable session carries one
   auto sdp = SdpSerializer::serialize(session);
   CHECK(sdp.find("v=0\r\n") != std::string::npos);
   CHECK(sdp.find("o=- 0 0 IN IP4 0.0.0.0\r\n") != std::string::npos);

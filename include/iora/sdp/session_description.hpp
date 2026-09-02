@@ -270,7 +270,12 @@ struct MediaDescription
 struct SessionDescription
 {
   std::uint8_t version = 0;           ///< SDP protocol version (always 0)
-  Origin origin;
+  /// o= line (RFC 4566 §5.2). std::optional so an absent or present-but-unusable
+  /// mandatory o= is represented as nullopt rather than a fabricated default
+  /// Origin{-,0,0,IN,IP4,0.0.0.0} (tracker 2026-07-25-1, D5). createOffer/
+  /// createAnswer always emplace a valid Origin; a parse under requireOrigin=false
+  /// with a malformed/absent o= leaves this nullopt.
+  std::optional<Origin> origin;
   std::string sessionName = "-";       ///< s= line
   std::optional<std::string> sessionInfo; ///< i= line
   std::optional<std::string> uri;      ///< u= line

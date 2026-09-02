@@ -86,12 +86,12 @@ TEST_CASE("Parser: minimal valid SDP", "[parser]")
 
   auto& sd = *result.value;
   REQUIRE(sd.version == 0);
-  REQUIRE(sd.origin.username == "-");
-  REQUIRE(sd.origin.sessId == "0");
-  REQUIRE(sd.origin.sessVersion == "0");
-  REQUIRE(sd.origin.netType == NetworkType::IN);
-  REQUIRE(sd.origin.addrType == AddressType::IP4);
-  REQUIRE(sd.origin.address == "0.0.0.0");
+  REQUIRE(sd.origin->username == "-");
+  REQUIRE(sd.origin->sessId == "0");
+  REQUIRE(sd.origin->sessVersion == "0");
+  REQUIRE(sd.origin->netType == NetworkType::IN);
+  REQUIRE(sd.origin->addrType == AddressType::IP4);
+  REQUIRE(sd.origin->address == "0.0.0.0");
   REQUIRE(sd.sessionName == "-");
   REQUIRE(sd.timeDescriptions.size() == 1);
   REQUIRE(sd.timeDescriptions[0].startTime == 0);
@@ -212,11 +212,213 @@ TEST_CASE("Parser: origin parsing edge cases — large numeric ids as strings", 
 
   auto result = SdpParser::parse(sdp);
   REQUIRE(result.hasValue());
-  auto& o = result.value->origin;
+  auto& o = *result.value->origin;
   REQUIRE(o.username == "jdoe");
   REQUIRE(o.sessId == "2890844526");
   REQUIRE(o.sessVersion == "2890842807");
   REQUIRE(o.address == "10.47.16.5");
+}
+
+// =========================================================================
+// Origin (o=) fallible parsing — tracker 2026-07-25-1 (D1-D6).
+// A present-but-malformed MANDATORY o= is rejected at the dispatch site with
+// the real cause+line (never coerced to the IN/IP4 value-defaults, never routed
+// through the presence gate); the diagnostic distinguishes an unmodeled family
+// (network/address type) from a wrong field count.
+// =========================================================================
+
+namespace
+{
+/// Wraps a given o= line in an otherwise-minimal, otherwise-valid SDP.
+std::string sdpWithOrigin(const std::string& originLine)
+{
+  return "v=0\r\n" + originLine + "\r\ns=-\r\nt=0 0\r\n";
+}
+} // namespace
+
+TEST_CASE("Parser: origin unknown nettype rejected, not coerced to IN", "[parser][origin]")
+{
+  auto sdp = sdpWithOrigin("o=- 0 0 XNET IP4 h");
+  // Lenient (default requireOrigin=true): fatal at the dispatch site, real cause+line.
+  auto lenient = SdpParser::parse(sdp);
+  REQUIRE(!lenient.hasValue());
+  REQUIRE(lenient.hasError());
+  REQUIRE(lenient.error->message.find("Unsupported origin network type 'XNET'")
+          != std::string::npos);
+  REQUIRE(lenient.error->line == 2);
+  // Strict: same fatal, same cause.
+  SdpParserOptions strict;
+  strict.strict = true;
+  auto s = SdpParser::parse(sdp, strict);
+  REQUIRE(!s.hasValue());
+  REQUIRE(s.error->message.find("Unsupported origin network type 'XNET'")
+          != std::string::npos);
+}
+
+TEST_CASE("Parser: origin unknown addrtype rejected, not coerced to IP4", "[parser][origin]")
+{
+  auto sdp = sdpWithOrigin("o=- 0 0 IN XADDR h");
+  auto r = SdpParser::parse(sdp);
+  REQUIRE(!r.hasValue());
+  REQUIRE(r.error->message.find("Unsupported origin address type 'XADDR'")
+          != std::string::npos);
+  REQUIRE(r.error->line == 2);
+}
+
+TEST_CASE("Parser: origin registered-but-unmodeled families rejected (PINT/ATM)",
+          "[parser][origin]")
+{
+  // RFC 2848 PINT: nettype TN. Fails on the nettype (checked before addrtype).
+  auto pint = SdpParser::parse(sdpWithOrigin("o=- 0 0 TN RFC2543 +1-201-406-4090"));
+  REQUIRE(!pint.hasValue());
+  REQUIRE(pint.error->message.find("Unsupported origin network type 'TN'")
+          != std::string::npos);
+  // RFC 3108: nettype ATM.
+  auto atm = SdpParser::parse(sdpWithOrigin("o=- 0 0 ATM NSAP 47.0091.8100"));
+  REQUIRE(!atm.hasValue());
+  REQUIRE(atm.error->message.find("Unsupported origin network type 'ATM'")
+          != std::string::npos);
+}
+
+TEST_CASE("Parser: origin wrong field count rejected (too few / surplus / empty)",
+          "[parser][origin]")
+{
+  // Too few fields.
+  auto few = SdpParser::parse(sdpWithOrigin("o=- 1"));
+  REQUIRE(!few.hasValue());
+  REQUIRE(few.error->message.find("Malformed o= line") != std::string::npos);
+  REQUIRE(few.error->line == 2);
+  // Empty value.
+  auto empty = SdpParser::parse(sdpWithOrigin("o="));
+  REQUIRE(!empty.hasValue());
+  REQUIRE(empty.error->message.find("Malformed o= line") != std::string::npos);
+  // Surplus 7th token.
+  auto surplus = SdpParser::parse(sdpWithOrigin("o=- 0 0 IN IP4 1.2.3.4 junk"));
+  REQUIRE(!surplus.hasValue());
+  REQUIRE(surplus.error->message.find("Malformed o= line") != std::string::npos);
+}
+
+TEST_CASE("Parser: origin non-numeric sess-id / sess-version rejected (RFC 4566 §9 1*DIGIT)",
+          "[parser][origin]")
+{
+  // sess-id non-numeric.
+  auto badId = SdpParser::parse(sdpWithOrigin("o=- abc 0 IN IP4 h"));
+  REQUIRE(!badId.hasValue());
+  REQUIRE(badId.error->message.find("Malformed o= line") != std::string::npos);
+  // sess-version non-numeric.
+  auto badVer = SdpParser::parse(sdpWithOrigin("o=- 0 def IN IP4 h"));
+  REQUIRE(!badVer.hasValue());
+  REQUIRE(badVer.error->message.find("Malformed o= line") != std::string::npos);
+  // A large all-digit sess-id (NTP-style) is still accepted.
+  auto ok = SdpParser::parse(sdpWithOrigin("o=- 18446744073709551615 2 IN IP4 h"));
+  REQUIRE(ok.hasValue());
+  REQUIRE(ok.value->origin->sessId == "18446744073709551615");
+}
+
+TEST_CASE("Parser: genuinely-absent o= hits the presence gate, distinct from malformed",
+          "[parser][origin]")
+{
+  // No o= line at all -> presence gate, line 0, "Missing required".
+  auto absent = SdpParser::parse("v=0\r\ns=-\r\nt=0 0\r\n");
+  REQUIRE(!absent.hasValue());
+  REQUIRE(absent.error->line == 0);
+  REQUIRE(absent.error->message.find("Missing required o= line") != std::string::npos);
+  // Present-but-malformed is DISTINCT: real line, real cause (not "Missing").
+  auto malformed = SdpParser::parse(sdpWithOrigin("o=- 0 0 XNET IP4 h"));
+  REQUIRE(!malformed.hasValue());
+  REQUIRE(malformed.error->line == 2);
+  REQUIRE(malformed.error->message.find("Missing required") == std::string::npos);
+}
+
+TEST_CASE("Parser: origin valid forms parse (IPv4, IPv6, case-insensitive, FQDN)",
+          "[parser][origin]")
+{
+  auto ip4 = SdpParser::parse(sdpWithOrigin("o=- 0 0 IN IP4 0.0.0.0"));
+  REQUIRE(ip4.hasValue());
+  REQUIRE(ip4.value->origin->addrType == AddressType::IP4);
+
+  auto ip6 = SdpParser::parse(sdpWithOrigin("o=- 0 0 IN IP6 2001:db8::1"));
+  REQUIRE(ip6.hasValue());
+  REQUIRE(ip6.value->origin->addrType == AddressType::IP6);
+  REQUIRE(ip6.value->origin->address == "2001:db8::1");
+
+  // *FromString are case-insensitive.
+  auto lower = SdpParser::parse(sdpWithOrigin("o=- 0 0 in ip4 0.0.0.0"));
+  REQUIRE(lower.hasValue());
+  REQUIRE(lower.value->origin->netType == NetworkType::IN);
+  REQUIRE(lower.value->origin->addrType == AddressType::IP4);
+
+  // FQDN is a legal unicast-address (RFC 4566 §5.2).
+  auto fqdn = SdpParser::parse(sdpWithOrigin("o=- 0 0 IN IP4 host.example.com"));
+  REQUIRE(fqdn.hasValue());
+  REQUIRE(fqdn.value->origin->address == "host.example.com");
+}
+
+TEST_CASE("Parser: origin address is opaque, not validated against addrtype (both directions)",
+          "[parser][origin]")
+{
+  // IP4 label + IPv6 literal: parses (address is opaque).
+  auto a = SdpParser::parse(sdpWithOrigin("o=- 0 0 IN IP4 2001:db8::1"));
+  REQUIRE(a.hasValue());
+  REQUIRE(a.value->origin->address == "2001:db8::1");
+  // IP6 label + IPv4 dotted-quad: parses.
+  auto b = SdpParser::parse(sdpWithOrigin("o=- 0 0 IN IP6 1.2.3.4"));
+  REQUIRE(b.hasValue());
+  REQUIRE(b.value->origin->address == "1.2.3.4");
+}
+
+TEST_CASE("Parser: duplicate o= line — strict rejects, lenient keeps the first",
+          "[parser][origin]")
+{
+  std::string dup =
+    "v=0\r\n"
+    "o=alice 1 1 IN IP4 1.1.1.1\r\n"
+    "o=bob 2 2 IN IP4 2.2.2.2\r\n"
+    "s=-\r\n"
+    "t=0 0\r\n";
+  // Strict: fatal duplicate.
+  SdpParserOptions strict;
+  strict.strict = true;
+  auto s = SdpParser::parse(dup, strict);
+  REQUIRE(!s.hasValue());
+  REQUIRE(s.error->message.find("Duplicate o= line") != std::string::npos);
+  REQUIRE(s.error->line == 3);
+  // Lenient: keep the first, warn.
+  auto l = SdpParser::parse(dup);
+  REQUIRE(l.hasValue());
+  REQUIRE(l.value->origin->username == "alice");
+  REQUIRE(l.value->origin->address == "1.1.1.1");
+  bool warned = false;
+  for (const auto& w : l.warnings)
+  {
+    if (w.message.find("Duplicate o= line") != std::string::npos)
+    {
+      warned = true;
+    }
+  }
+  REQUIRE(warned);
+}
+
+TEST_CASE("Parser: malformed o= skipped only when o= not required (lenient + !requireOrigin)",
+          "[parser][origin]")
+{
+  // With requireOrigin=false, a present-but-malformed o= is a warning+skip,
+  // NOT fatal (the D5 residual close: origin stays unset rather than fabricated).
+  SdpParserOptions opts;
+  opts.requireOrigin = false;
+  auto r = SdpParser::parse(sdpWithOrigin("o=- 0 0 XNET IP4 h"), opts);
+  REQUIRE(r.hasValue());
+  // D5 close: origin is left nullopt, NOT a fabricated default {IN,IP4,0.0.0.0}.
+  REQUIRE(!r.value->origin.has_value());
+  bool warned = false;
+  for (const auto& w : r.warnings)
+  {
+    if (w.message.find("Unsupported origin network type 'XNET'") != std::string::npos)
+    {
+      warned = true;
+    }
+  }
+  REQUIRE(warned);
 }
 
 // =========================================================================
@@ -947,7 +1149,7 @@ TEST_CASE("Parser: WebRTC offer SDP", "[parser][webrtc]")
   REQUIRE(!result.hasError());
 
   auto& sd = *result.value;
-  REQUIRE(sd.origin.sessId == "4962303333179871722");
+  REQUIRE(sd.origin->sessId == "4962303333179871722");
   REQUIRE(sd.groups.size() == 1);
   REQUIRE(sd.groups[0].semantics == "BUNDLE");
   REQUIRE(sd.groups[0].mids.size() == 2);
@@ -1057,7 +1259,7 @@ TEST_CASE("Parser: SIP SDP (RTP/AVP with SDES crypto, no ICE)", "[parser][sip]")
   REQUIRE(result.hasValue());
 
   auto& sd = *result.value;
-  REQUIRE(sd.origin.username == "alice");
+  REQUIRE(sd.origin->username == "alice");
   REQUIRE(sd.sessionName == "SIP Call");
   REQUIRE(sd.connection.has_value());
   REQUIRE(sd.connection->address == "10.0.0.1");
@@ -1534,9 +1736,9 @@ TEST_CASE("Parser: round-trip verify — all session and media fields populated"
 
   // Session level
   REQUIRE(sd.version == 0);
-  REQUIRE(sd.origin.username == "jdoe");
-  REQUIRE(sd.origin.sessId == "2890844526");
-  REQUIRE(sd.origin.sessVersion == "2890842807");
+  REQUIRE(sd.origin->username == "jdoe");
+  REQUIRE(sd.origin->sessId == "2890844526");
+  REQUIRE(sd.origin->sessVersion == "2890842807");
   REQUIRE(sd.sessionName == "SDP Workshop");
   REQUIRE(sd.sessionInfo == "A workshop session");
   REQUIRE(sd.uri == "http://example.com/sdp");

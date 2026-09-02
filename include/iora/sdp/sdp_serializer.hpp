@@ -378,8 +378,17 @@ inline std::string serializeSessionLevel(
   // v=
   result += "v=" + std::to_string(session.version) + le;
 
-  // o=
-  result += serializeOrigin(session.origin, le);
+  // o= (RFC 4566 §5.2). When origin is nullopt — only reachable when a caller
+  // parsed with requireOrigin=false and an absent/unusable o= — no o= line is
+  // emitted. This is the honest representation (the serializer is total and
+  // non-throwing; it never synthesizes a default origin), and it yields
+  // INTENTIONALLY non-conformant SDP: a compliant parser (including this one at
+  // its default requireOrigin=true) will reject the result with "Missing
+  // required o= line". The caller owns re-conformance.
+  if (session.origin)
+  {
+    result += serializeOrigin(*session.origin, le);
+  }
 
   // s=
   if (options.omitSessionName && session.sessionName.empty())

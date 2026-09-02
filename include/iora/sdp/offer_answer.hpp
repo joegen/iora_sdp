@@ -143,6 +143,24 @@ struct OfferAnswer
 {
   OfferAnswer() = delete;
 
+  /// A valid, freshly-minted origin for an INITIAL offer/answer: the default
+  /// Origin (username "-", IN, IP4, address "0.0.0.0") with a random sess-id and
+  /// sess-version "1". Shared by createOffer/createAnswer so the minting
+  /// invariant has one home. NOTE: this is initial-offer scaffolding — a re-offer
+  /// within an existing session (RFC 3264 §8) must keep the same sess-id and use
+  /// a GREATER sess-version, which is the caller's responsibility, not this
+  /// helper's.
+  static Origin freshOrigin()
+  {
+    Origin o;
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<std::uint64_t> dist;
+    o.sessId = std::to_string(dist(gen));
+    o.sessVersion = "1";
+    return o;
+  }
+
   /// Flip an SDP direction for offer/answer per RFC 3264.
   static Direction flipDirection(Direction direction) noexcept
   {
@@ -666,14 +684,7 @@ struct OfferAnswer
   {
     SessionDescription session;
     session.version = 0;
-
-    {
-      std::random_device rd;
-      std::mt19937_64 gen(rd());
-      std::uniform_int_distribution<std::uint64_t> dist;
-      session.origin.sessId = std::to_string(dist(gen));
-    }
-    session.origin.sessVersion = "1";
+    session.origin = freshOrigin();
 
     session.sessionName = "-";
 
@@ -758,14 +769,7 @@ struct OfferAnswer
   {
     SessionDescription session;
     session.version = 0;
-
-    {
-      std::random_device rd;
-      std::mt19937_64 gen(rd());
-      std::uniform_int_distribution<std::uint64_t> dist;
-      session.origin.sessId = std::to_string(dist(gen));
-    }
-    session.origin.sessVersion = "1";
+    session.origin = freshOrigin();
 
     session.sessionName = "-";
 

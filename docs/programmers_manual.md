@@ -1084,7 +1084,7 @@ struct SessionDescription
 {
   // Protocol and identity
   std::uint8_t version = 0;                                    // SDP protocol version (always 0)
-  Origin origin;                                               // o= line
+  std::optional<Origin> origin;                                // o= line (nullopt if absent/unusable)
   std::string sessionName = "-";                               // s= line
 
   // Optional session info
@@ -1134,8 +1134,9 @@ using namespace iora::sdp;
 
 SessionDescription session;
 session.version = 0;
-session.origin.sessId = "1234567890";
-session.origin.sessVersion = "1";
+session.origin.emplace(); // origin is std::optional<Origin>
+session.origin->sessId = "1234567890";
+session.origin->sessVersion = "1";
 session.sessionName = "-";
 session.timeDescriptions.push_back({0, 0, {}});
 // Add media sections as needed...
@@ -1688,7 +1689,7 @@ Chrome/Firefox convention.
 - When `timeDescriptions` is empty and `omitTiming` is false, the serializer emits `t=0 0`.
 - When `sessionName` is set, `s=` line is always emitted (unless `omitSessionName=true` and `sessionName` is empty).
 - The `v=` line always emits the stored version (always 0).
-- The `o=` line always uses the stored `Origin` values.
+- The `o=` line is emitted from the stored `Origin` when `origin` has a value; when `origin` is `std::nullopt` (an absent/unusable o= parsed with `requireOrigin=false`) **no `o=` line is emitted** — the serializer never synthesizes a default, so the output is intentionally non-conformant (a default re-parse rejects it with "Missing required o= line").
 
 ---
 

@@ -382,8 +382,9 @@ TEST_CASE("SessionDescription: default construction", "[session][SessionDescript
 TEST_CASE("SessionDescription: add multiple media descriptions", "[session][SessionDescription]")
 {
   SessionDescription sd;
-  sd.origin.sessId = "1234567890";
-  sd.origin.sessVersion = "1";
+  sd.origin.emplace();
+  sd.origin->sessId = "1234567890";
+  sd.origin->sessVersion = "1";
 
   MediaDescription audio;
   audio.mediaType = MediaType::AUDIO;
@@ -448,7 +449,8 @@ TEST_CASE("SessionDescription: session-level fingerprints and setup", "[session]
 TEST_CASE("SessionDescription: equality — identical", "[session][SessionDescription]")
 {
   SessionDescription a;
-  a.origin.sessId = "100";
+  a.origin.emplace();
+  a.origin->sessId = "100";
   a.sessionName = "Test";
   a.iceUfrag = "user";
   a.icePwd = "pass";
@@ -466,7 +468,8 @@ TEST_CASE("SessionDescription: equality — identical", "[session][SessionDescri
 TEST_CASE("SessionDescription: inequality — any field difference", "[session][SessionDescription]")
 {
   SessionDescription base;
-  base.origin.sessId = "100";
+  base.origin.emplace();
+  base.origin->sessId = "100";
   base.sessionName = "Test";
 
   SessionDescription diffVersion = base;

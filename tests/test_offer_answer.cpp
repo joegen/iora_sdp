@@ -1073,12 +1073,12 @@ TEST_CASE("createOffer", "[offer_answer][offer]")
   SECTION("origin with random sessId, sessVersion='1', username='-', address='0.0.0.0'")
   {
     auto offer = OfferAnswer::createOffer();
-    REQUIRE_FALSE(offer.origin.sessId.empty());
-    REQUIRE(offer.origin.sessVersion == "1");
-    REQUIRE(offer.origin.username == "-");
-    REQUIRE(offer.origin.netType == NetworkType::IN);
-    REQUIRE(offer.origin.addrType == AddressType::IP4);
-    REQUIRE(offer.origin.address == "0.0.0.0");
+    REQUIRE_FALSE(offer.origin->sessId.empty());
+    REQUIRE(offer.origin->sessVersion == "1");
+    REQUIRE(offer.origin->username == "-");
+    REQUIRE(offer.origin->netType == NetworkType::IN);
+    REQUIRE(offer.origin->addrType == AddressType::IP4);
+    REQUIRE(offer.origin->address == "0.0.0.0");
     REQUIRE(offer.sessionName == "-");
   }
 
@@ -1299,10 +1299,10 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
 
     REQUIRE(answer.version == 0);
     REQUIRE(answer.sessionName == "-");
-    REQUIRE_FALSE(answer.origin.sessId.empty());
-    REQUIRE(answer.origin.sessVersion == "1");
-    REQUIRE(answer.origin.username == "-");
-    REQUIRE(answer.origin.address == "0.0.0.0");
+    REQUIRE_FALSE(answer.origin->sessId.empty());
+    REQUIRE(answer.origin->sessVersion == "1");
+    REQUIRE(answer.origin->username == "-");
+    REQUIRE(answer.origin->address == "0.0.0.0");
     REQUIRE(answer.timeDescriptions.size() == 1);
     REQUIRE(answer.timeDescriptions[0].startTime == 0);
     REQUIRE(answer.timeDescriptions[0].stopTime == 0);
