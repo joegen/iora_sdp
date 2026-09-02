@@ -56,7 +56,11 @@ struct AnswerOptions
   std::optional<std::string> icePwd;
   std::optional<FingerprintAttribute> fingerprint;
   SetupRole dtlsSetup = SetupRole::ACTIVE;
-  std::optional<std::vector<RtpMapAttribute>> supportedCodecs;
+  /// The answerer's OWN media capabilities. When set, createAnswer negotiates
+  /// against the offer and emits the ANSWERER's rtpMaps / fmtps / rtcpFeedbacks
+  /// (intersected with the offer) plus the URI-intersected extMaps — never a
+  /// verbatim echo of the offerer's attributes (RFC 3264 §6; RFC 7587 §7.1).
+  std::optional<MediaDescription> supportedMedia;
   std::vector<MediaType> rejectMediaTypes;
 
   bool operator==(const AnswerOptions& other) const noexcept
@@ -65,7 +69,7 @@ struct AnswerOptions
         && icePwd == other.icePwd
         && fingerprint == other.fingerprint
         && dtlsSetup == other.dtlsSetup
-        && supportedCodecs == other.supportedCodecs
+        && supportedMedia == other.supportedMedia
         && rejectMediaTypes == other.rejectMediaTypes;
   }
 
@@ -150,6 +154,144 @@ struct OfferAnswer
       case Direction::INACTIVE: return Direction::INACTIVE;
     }
     return Direction::SENDRECV;
+  }
+
+  /// Reverse an a=extmap direction qualifier for the answer (RFC 8285 §7:
+  /// sendonly<->recvonly; sendrecv/inactive unchanged; absent stays absent ==
+  /// sendrecv). Reuses flipDirection — no second direction reversal.
+  static std::optional<Direction> flipExtmapDirection(std::optional<Direction> d) noexcept
+  {
+    if (!d.has_value())
+    {
+      return std::nullopt;
+    }
+    return flipDirection(*d);
+  }
+
+  /// Intersect two direction qualifiers as send/recv capability sets (absent ==
+  /// sendrecv). Returns {keep, direction}: keep=false when the intersection is
+  /// empty (no shared send or recv) — the caller drops the extension (RFC 8285
+  /// §7). A full sendrecv result is reported as absent (nullopt) so the answer
+  /// omits the redundant qualifier (RFC 8285 §5 default).
+  static std::pair<bool, std::optional<Direction>>
+  intersectDirections(std::optional<Direction> a, std::optional<Direction> b) noexcept
+  {
+    auto caps = [](std::optional<Direction> d) -> std::pair<bool, bool>
+    {
+      switch (d.value_or(Direction::SENDRECV))
+      {
+        case Direction::SENDRECV: return {true, true};
+        case Direction::SENDONLY: return {true, false};
+        case Direction::RECVONLY: return {false, true};
+        case Direction::INACTIVE: return {false, false};
+      }
+      return {true, true};
+    };
+    const auto ca = caps(a);
+    const auto cb = caps(b);
+    const bool send = ca.first && cb.first;
+    const bool recv = ca.second && cb.second;
+    if (send && recv) { return {true, std::nullopt}; }
+    if (send) { return {true, Direction::SENDONLY}; }
+    if (recv) { return {true, Direction::RECVONLY}; }
+    return {false, std::nullopt};
+  }
+
+  /// True when `media` advertises rtcp-fb (type, subtype) for payload type `pt`,
+  /// counting a wildcard `a=rtcp-fb:* ...` entry as applying to every PT
+  /// (RFC 4585 §5.1).
+  static bool hasRtcpFb(const MediaDescription& media, std::uint8_t pt,
+                        const std::string& type,
+                        const std::optional<std::string>& subtype)
+  {
+    const std::string ptStr = std::to_string(pt);
+    for (const auto& fb : media.rtcpFeedbacks)
+    {
+      if ((fb.payloadType == ptStr || fb.payloadType == "*")
+          && fb.type == type && fb.subtype == subtype)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// True when `media` advertises rtcp-fb (type, subtype) as an explicit
+  /// wildcard `*` entry (RFC 4585 §5.1).
+  static bool hasRtcpFbWildcard(const MediaDescription& media,
+                                const std::string& type,
+                                const std::optional<std::string>& subtype)
+  {
+    for (const auto& fb : media.rtcpFeedbacks)
+    {
+      if (fb.payloadType == "*" && fb.type == type && fb.subtype == subtype)
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Build the answer's a=extmap set for one media section (RFC 8285 §7).
+  /// Shared by the matched and mirror createAnswer branches. `offerStreamDir` is
+  /// the offer m= section's effective direction: an extmap with NO direction
+  /// qualifier inherits it (RFC 8285 §7), so it is resolved BEFORE the flip.
+  /// The offer's numeric id is always reused (ids MUST NOT be remapped). When
+  /// `answererMedia` is null (capability-blind fallback) every offered extension
+  /// is kept, direction = flipped effective; otherwise the set is intersected by
+  /// CASE-SENSITIVE URI (RFC 3986 — exact ==, never detail::iequals) and the
+  /// direction is flip(offer) ∩ answerer, dropping an incompatible extension.
+  /// A resolved direction equal to the answer's stream direction is emitted as
+  /// absent (RFC 8285 §5 — the qualifier then inherits the stream direction).
+  static std::vector<ExtMapAttribute>
+  answerExtMaps(const MediaDescription& offerMedia, Direction offerStreamDir,
+                const MediaDescription* answererMedia)
+  {
+    const Direction answerStreamDir = flipDirection(offerStreamDir);
+    std::vector<ExtMapAttribute> result;
+    for (const auto& oext : offerMedia.extMaps)
+    {
+      const Direction offerEff = oext.direction.value_or(offerStreamDir);
+      const Direction flipped = flipDirection(offerEff);
+
+      std::optional<Direction> outDir;
+      if (answererMedia == nullptr)
+      {
+        outDir = flipped;
+      }
+      else
+      {
+        const ExtMapAttribute* aext = nullptr;
+        for (const auto& ae : answererMedia->extMaps)
+        {
+          if (ae.uri == oext.uri)
+          {
+            aext = &ae;
+            break;
+          }
+        }
+        if (aext == nullptr)
+        {
+          continue;
+        }
+        const auto dir = intersectDirections(flipped, aext->direction);
+        if (!dir.first)
+        {
+          continue;
+        }
+        outDir = dir.second; // nullopt == sendrecv
+      }
+      // Emit absent when it matches the stream direction the extmap would
+      // otherwise inherit (keeps the wire minimal; RFC 8285 §5).
+      if (outDir.has_value() && *outDir == answerStreamDir)
+      {
+        outDir = std::nullopt;
+      }
+      ExtMapAttribute out = oext;
+      out.direction = outDir;
+      result.push_back(std::move(out));
+    }
+    return result;
   }
 
   /// Set the direction attribute of a media section.
@@ -733,10 +875,14 @@ struct OfferAnswer
         answerMedia.mid = offerMedia.mid;
         answerMedia.rtcpMux = offerMedia.rtcpMux;
 
-        if (answerOptions.supportedCodecs.has_value())
+        if (answerOptions.supportedMedia.has_value())
         {
-          MediaDescription answererMedia;
-          answererMedia.rtpMaps = answerOptions.supportedCodecs.value();
+          // Option A: the answerer declares its OWN capabilities. Emit the
+          // answerer's rtpMaps / fmtps / rtcpFeedbacks (intersected with the
+          // offer, keyed to the answerer PT) and the URI-intersected extMaps —
+          // never a verbatim echo of the offerer's attributes (RFC 3264 §6;
+          // RFC 7587 §7.1; RFC 4585 §4.2; RFC 8285 §7).
+          const MediaDescription& answererMedia = answerOptions.supportedMedia.value();
           auto matched = matchCodecs(offerMedia, answererMedia);
 
           if (matched.empty())
@@ -747,19 +893,146 @@ struct OfferAnswer
           }
           else
           {
-            answerMedia.rtpMaps = matched;
-            for (const auto& codec : matched)
+            // The offer's codecs normalized so rtpmap-less RFC 3551 statics also
+            // resolve — used for the answerer-PT ↔ offer-PT correspondence.
+            const std::vector<RtpMapAttribute> offerCodecs =
+              normalizeStaticFormats(offerMedia);
+
+            // Dedup guard shared by both rtcp-fb emit paths.
+            auto pushUniqueFb = [&](RtcpFbAttribute e)
             {
-              answerMedia.formats.push_back(std::to_string(codec.payloadType));
+              if (std::find(answerMedia.rtcpFeedbacks.begin(),
+                            answerMedia.rtcpFeedbacks.end(), e)
+                  == answerMedia.rtcpFeedbacks.end())
+              {
+                answerMedia.rtcpFeedbacks.push_back(std::move(e));
+              }
+            };
+
+            answerMedia.rtpMaps = std::move(matched);
+            for (const auto& codec : answerMedia.rtpMaps)
+            {
+              const std::uint8_t answererPt = codec.payloadType;
+              const std::string answererPtStr = std::to_string(answererPt);
+              answerMedia.formats.push_back(answererPtStr);
+
+              // FMTP: the answerer's own fmtp for this PT (absent → codec
+              // defaults; never the offerer's).
+              for (const auto& fmtp : answererMedia.fmtps)
+              {
+                if (fmtp.payloadType == answererPt)
+                {
+                  answerMedia.fmtps.push_back(fmtp);
+                }
+              }
+
+              // Offer PT for this codec: first name+clock match in offer m=
+              // FMT-LIST order (deterministic tie-break; does not disambiguate
+              // fmtp-differentiated same-name codecs — see tracker 2026-09-02-3).
+              std::optional<std::uint8_t> offerPt;
+              for (const auto& oc : offerCodecs)
+              {
+                if (detail::iequals(oc.encodingName, codec.encodingName)
+                    && oc.clockRate == codec.clockRate)
+                {
+                  offerPt = oc.payloadType;
+                  break;
+                }
+              }
+
+              // RTCP-FB: intersection on the (type, subtype) tuple, keyed to the
+              // answerer PT. An answerer specific-PT entry is kept when the offer
+              // advertises the same feedback for the offer PT (specific or '*').
+              // An answerer '*' entry is emitted verbatim only when the offer
+              // also declares '*'; otherwise it is expanded to this PT when the
+              // offer supports it (RFC 4585 §4.2 / §5.1).
+              if (offerPt.has_value())
+              {
+                for (const auto& afb : answererMedia.rtcpFeedbacks)
+                {
+                  const bool specific = (afb.payloadType == answererPtStr);
+                  const bool wildcard = (afb.payloadType == "*");
+                  if (!specific && !wildcard)
+                  {
+                    continue;
+                  }
+                  if (!hasRtcpFb(offerMedia, *offerPt, afb.type, afb.subtype))
+                  {
+                    continue;
+                  }
+                  if (wildcard && hasRtcpFbWildcard(offerMedia, afb.type, afb.subtype))
+                  {
+                    // Both sides declare '*' — emit '*' once (section-scoped).
+                    pushUniqueFb({"*", afb.type, afb.subtype});
+                  }
+                  else
+                  {
+                    // Emit / expand to this specific answerer PT.
+                    pushUniqueFb({answererPtStr, afb.type, afb.subtype});
+                  }
+                }
+              }
             }
+
+            // A section-scoped '*' subsumes any specific-PT entry with the same
+            // (type, subtype) — drop the redundant specifics (RFC 4585 §5.1).
+            // Snapshot the wildcard tuples first so the remove_if predicate does
+            // not read the vector it is compacting (order-independent).
+            std::vector<std::pair<std::string, std::optional<std::string>>> wildFbs;
+            for (const auto& fb : answerMedia.rtcpFeedbacks)
+            {
+              if (fb.payloadType == "*")
+              {
+                wildFbs.emplace_back(fb.type, fb.subtype);
+              }
+            }
+            if (!wildFbs.empty())
+            {
+              answerMedia.rtcpFeedbacks.erase(
+                std::remove_if(answerMedia.rtcpFeedbacks.begin(),
+                               answerMedia.rtcpFeedbacks.end(),
+                               [&](const RtcpFbAttribute& fb)
+                               {
+                                 return fb.payloadType != "*"
+                                   && std::any_of(wildFbs.begin(), wildFbs.end(),
+                                        [&](const auto& w)
+                                        {
+                                          return w.first == fb.type
+                                            && w.second == fb.subtype;
+                                        });
+                               }),
+                answerMedia.rtcpFeedbacks.end());
+            }
+
+            // PTIME / MAXPTIME: the answerer's own packetization preference
+            // (RFC 3264 §6.1). Absent → omitted; never the offerer's.
+            answerMedia.ptime = answererMedia.ptime;
+            answerMedia.maxptime = answererMedia.maxptime;
+
+            // EXTMAP (media-level): URI-intersected against the answerer, offer
+            // id reused, direction reconciled (RFC 8285 §7 — see answerExtMaps).
+            answerMedia.extMaps = answerExtMaps(
+              offerMedia, *offer.effectiveDirection(i), &answererMedia);
           }
         }
         else
         {
+          // Capability-blind fallback (no answerer template): accept the offer's
+          // codecs as-offered and echo the offerer's fmtp / rtcp-fb. Echoing fmtp
+          // is required for the RFC 4867 §8.3.1 MUST-echo framing params (AMR
+          // octet-align et al.) and de-facto for H.264 packetization-mode; it
+          // over-advertises the orthogonal opus/telephone-event params (RFC 7587
+          // §7.1), and echoing rtcp-fb over-advertises feedback (RFC 4585 §4.2).
+          // A correct capability-blind policy must be CODEC-AWARE (MUST-echo vs
+          // MUST-NOT-echo) and is deferred to its own tracker (2026-09-02-4) — a
+          // caller needing conformant per-codec negotiation supplies supportedMedia
+          // and takes the matched branch above. Only the a=extmap direction flip
+          // (RFC 8285 §7 — id reused) is applied here, a pure correctness fix.
           answerMedia.rtpMaps = offerMedia.rtpMaps;
           answerMedia.fmtps = offerMedia.fmtps;
           answerMedia.rtcpFeedbacks = offerMedia.rtcpFeedbacks;
-          answerMedia.extMaps = offerMedia.extMaps;
+          answerMedia.extMaps = answerExtMaps(
+            offerMedia, *offer.effectiveDirection(i), nullptr);
           // Mirror the offer's m= fmt list directly (RFC 3264 section 6.1).
           // Building formats from rtpMaps would drop the offer's rtpmap-less
           // static PTs and emit an m= line with no format tokens — invalid SDP

@@ -317,7 +317,8 @@ TEST_CASE("createAnswer: UNKNOWN proto on an audio offer -> port-0 INACTIVE",
     withHeader("m=audio 5004 SOME/VENDOR/SECURE 0\r\n"));
   REQUIRE(offer.value.has_value());
   AnswerOptions opts;
-  opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  opts.supportedMedia = MediaDescription{};
+  opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
 
   auto ans = OfferAnswer::createAnswer(*offer.value, opts);
   REQUIRE(ans.mediaDescriptions.size() == 1);
@@ -328,7 +329,7 @@ TEST_CASE("createAnswer: UNKNOWN proto on an audio offer -> port-0 INACTIVE",
   REQUIRE(m.rawProtocol == "SOME/VENDOR/SECURE"); // echoed, not ""
 }
 
-TEST_CASE("createAnswer: UNKNOWN proto without supportedCodecs -> port-0",
+TEST_CASE("createAnswer: UNKNOWN proto without supportedMedia -> port-0",
           "[unknown][offer_answer][createAnswer]")
 {
   auto offer = SdpParser::parse(
@@ -361,7 +362,7 @@ TEST_CASE("createAnswer: recognized-but-unmodelable IMAGE media -> port-0 (PART 
 {
   // T.38 fax: image/udptl are recognized as of 2026-09-01-1, so the hasUnknownProfile
   // guard no longer fires. PART 2d's MEDIA-type reject must still port-0 it (a fax
-  // stream this SDP layer cannot answer) on BOTH the with- and without-supportedCodecs
+  // stream this SDP layer cannot answer) on BOTH the with- and without-supportedMedia
   // paths, echoing the recognized IMAGE/UDPTL enums (no raw token).
   auto offer = SdpParser::parse(withHeader("m=image 49172 udptl t38\r\n"));
   REQUIRE(offer.value.has_value());
@@ -375,7 +376,8 @@ TEST_CASE("createAnswer: recognized-but-unmodelable IMAGE media -> port-0 (PART 
   REQUIRE(ansNoCodecs.mediaDescriptions[0].rawMediaType.empty());
 
   AnswerOptions withCodecs;
-  withCodecs.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  withCodecs.supportedMedia = MediaDescription{};
+  withCodecs.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
   auto ansCodecs = OfferAnswer::createAnswer(*offer.value, withCodecs);
   REQUIRE(ansCodecs.mediaDescriptions.size() == 1);
   REQUIRE(ansCodecs.mediaDescriptions[0].port == 0); // rejected before codec matching
@@ -400,7 +402,8 @@ TEST_CASE("createAnswer: a mixed offer (valid audio + T.38 image section) preser
   REQUIRE(offer.value->mediaDescriptions.size() == 2);
 
   AnswerOptions opts;
-  opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  opts.supportedMedia = MediaDescription{};
+  opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
   auto ans = OfferAnswer::createAnswer(*offer.value, opts);
 
   // Both sections answered, in order: section 0 accepted, section 1 port-0 reject.
@@ -482,7 +485,8 @@ TEST_CASE("createAnswer: RTP/AVPF offer is accepted and echoes RTP/AVPF (served-
   REQUIRE(offer.value->mediaDescriptions[0].protocol == TransportProtocol::RTP_AVPF);
 
   AnswerOptions opts;
-  opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  opts.supportedMedia = MediaDescription{};
+  opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
   auto ans = OfferAnswer::createAnswer(*offer.value, opts);
   REQUIRE(ans.mediaDescriptions.size() == 1);
   const auto& m = ans.mediaDescriptions[0];
@@ -507,7 +511,8 @@ TEST_CASE("createAnswer: UDP/TLS/RTP/SAVP (DTLS-SRTP) is answered proto-agnostic
           TransportProtocol::UDP_TLS_RTP_SAVP);
 
   AnswerOptions opts;
-  opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+  opts.supportedMedia = MediaDescription{};
+  opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
   opts.fingerprint = FingerprintAttribute{
     "sha-256",
     "D1:A2:B3:C4:E5:F6:07:18:29:3A:4B:5C:6D:7E:8F:90:"

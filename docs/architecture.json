@@ -554,14 +554,14 @@
       },
       "createAnswer": {
         "signature": "SessionDescription createAnswer(const SessionDescription& offer, const AnswerOptions& answerOptions)",
-        "description": "Generate an SDP answer from a received offer. Intersects codecs per media section (retaining answerer preference order), mirrors ICE credentials, sets direction by flipping the offer's direction (sendonly->recvonly, recvonly->sendonly, sendrecv->sendrecv, inactive->inactive), and copies BUNDLE group if present.",
+        "description": "Generate an SDP answer from a received offer. Intersects codecs per media section (retaining answerer preference order), generates its own ICE credentials (or uses answerOptions-supplied ones), sets direction by flipping the offer's direction (sendonly->recvonly, recvonly->sendonly, sendrecv->sendrecv, inactive->inactive), and copies BUNDLE group if present.",
         "options": {
           "AnswerOptions": {
             "iceUfrag": "std::optional<std::string> — answerer's ICE username fragment (generated if not provided)",
             "icePwd": "std::optional<std::string> — answerer's ICE password (generated if not provided)",
             "fingerprint": "std::optional<FingerprintAttribute> — answerer's DTLS fingerprint",
             "dtlsSetup": "SetupRole (default: ACTIVE) — a=setup value for the answer (typically ACTIVE when offer is ACTPASS)",
-            "supportedCodecs": "std::optional<std::vector<RtpMapAttribute>> — answerer's supported codecs for intersection. If not provided, all offered codecs are accepted.",
+            "supportedMedia": "std::optional<MediaDescription> — the answerer's OWN capability template. If provided, createAnswer negotiates against the offer and emits the answerer's own rtpMaps/fmtps/rtcpFeedbacks (intersected, keyed to the answerer PT) + URI-intersected extMaps (offer id reused, direction flipped per RFC 8285 §7) + the answerer's ptime/maxptime — never a verbatim echo of the offerer's (RFC 3264 §6, RFC 7587 §7.1, RFC 4585 §4.2). If absent, the offer's codecs are accepted as-offered and its fmtp/rtcp-fb echoed verbatim, while a=extmap is carried over with the offer id reused and its direction flipped (RFC 8285 §7) — the same extmap handling as the matched branch (capability-blind fallback).",
             "rejectMediaTypes": "std::vector<MediaType> — media types to reject (port set to 0)"
           }
         },

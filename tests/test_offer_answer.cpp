@@ -41,7 +41,7 @@ TEST_CASE("AnswerOptions default construction and equality", "[offer_answer][opt
   REQUIRE_FALSE(a.icePwd.has_value());
   REQUIRE_FALSE(a.fingerprint.has_value());
   REQUIRE(a.dtlsSetup == SetupRole::ACTIVE);
-  REQUIRE_FALSE(a.supportedCodecs.has_value());
+  REQUIRE_FALSE(a.supportedMedia.has_value());
   REQUIRE(a.rejectMediaTypes.empty());
 
   b.dtlsSetup = SetupRole::PASSIVE;
@@ -700,7 +700,7 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
 
   SECTION("3.18 C-1 guard: rtpMaps populated + formats empty returns the full rtpMaps set")
   {
-    // Models the createAnswer answerer operand (rtpMaps = supportedCodecs, no
+    // Models the createAnswer answerer operand (rtpMaps = supportedMedia.rtpMaps, no
     // formats) and iora_media's synthLocalOffer. PASS 2 must recover every entry.
     MediaDescription media;
     media.rtpMaps.push_back({0, "PCMU", 8000, {}});
@@ -732,11 +732,12 @@ TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answe
     return offer;
   };
 
-  SECTION("3.7 supportedCodecs branch: answers a real port + explicit rtpmap, not port 0/INACTIVE")
+  SECTION("3.7 supportedMedia branch: answers a real port + explicit rtpmap, not port 0/INACTIVE")
   {
     SessionDescription offer = makeStaticOffer({"0", "8"});
     AnswerOptions opts;
-    opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+    opts.supportedMedia = MediaDescription{};
+    opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
 
     SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
     REQUIRE(answer.mediaDescriptions.size() == 1);
@@ -750,10 +751,10 @@ TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answe
     REQUIRE(hasFmt0);
   }
 
-  SECTION("3.8 no-supportedCodecs mirror: answer echoes the offer's non-empty fmt list")
+  SECTION("3.8 no-supportedMedia mirror: answer echoes the offer's non-empty fmt list")
   {
     SessionDescription offer = makeStaticOffer({"0", "8"});
-    SessionDescription answer = OfferAnswer::createAnswer(offer); // no supportedCodecs
+    SessionDescription answer = OfferAnswer::createAnswer(offer); // no supportedMedia
 
     REQUIRE(answer.mediaDescriptions.size() == 1);
     const auto& am = answer.mediaDescriptions[0];
@@ -761,7 +762,7 @@ TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answe
     REQUIRE(am.formats == offer.mediaDescriptions[0].formats);
   }
 
-  SECTION("3.8b no-supportedCodecs mirror, NORMAL offer: precise formats + rtpMaps contract")
+  SECTION("3.8b no-supportedMedia mirror, NORMAL offer: precise formats + rtpMaps contract")
   {
     SessionDescription offer;
     MediaDescription m;
@@ -781,12 +782,13 @@ TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answe
     REQUIRE(am.rtpMaps == offer.mediaDescriptions[0].rtpMaps);
   }
 
-  SECTION("3.9 non-mutation: createAnswer supportedCodecs path leaves the offer unchanged")
+  SECTION("3.9 non-mutation: createAnswer supportedMedia path leaves the offer unchanged")
   {
     SessionDescription offer = makeStaticOffer({"0", "8"});
     const SessionDescription offerBefore = offer;
     AnswerOptions opts;
-    opts.supportedCodecs = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
+    opts.supportedMedia = MediaDescription{};
+    opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
     (void)OfferAnswer::createAnswer(offer, opts);
     REQUIRE(offer == offerBefore); // SessionDescription operator== deep-compares
   }
@@ -1399,7 +1401,7 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     REQUIRE(answer.setup.value() == SetupRole::ACTIVE);
   }
 
-  SECTION("supportedCodecs provided — only matching codecs in answer")
+  SECTION("supportedMedia provided — only matching codecs in answer")
   {
     auto offer = makeOffer();
 
@@ -1407,7 +1409,8 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     answerOpts.iceUfrag = "au";
     answerOpts.icePwd = "ap1234567890123456789012";
     // Answerer supports opus (with different PT) and VP8
-    answerOpts.supportedCodecs = std::vector<RtpMapAttribute>{
+    answerOpts.supportedMedia = MediaDescription{};
+    answerOpts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{
       {120, "opus", 48000, std::uint8_t(2)},
       {100, "VP8", 90000, {}}
     };
@@ -1437,7 +1440,8 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     answerOpts.iceUfrag = "au";
     answerOpts.icePwd = "ap1234567890123456789012";
     // Answerer only supports G722 — no overlap with offer
-    answerOpts.supportedCodecs = std::vector<RtpMapAttribute>{
+    answerOpts.supportedMedia = MediaDescription{};
+    answerOpts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{
       {9, "G722", 8000, std::uint8_t(1)}
     };
 
@@ -1450,7 +1454,7 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     REQUIRE(answer.mediaDescriptions[1].direction == Direction::INACTIVE);
   }
 
-  SECTION("supportedCodecs not provided — all offered codecs accepted")
+  SECTION("supportedMedia not provided — all offered codecs accepted")
   {
     auto offer = makeOffer();
 
@@ -1630,7 +1634,7 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     REQUIRE(answer.mediaDescriptions[1].rtcpMux == false);
   }
 
-  SECTION("extMaps and fmtps copied when supportedCodecs not provided")
+  SECTION("mirror branch (no supportedMedia): fmtp + rtcp-fb echoed, extmap flipped")
   {
     auto offer = makeOffer();
     offer.mediaDescriptions[0].fmtps.push_back({111, "minptime=10;useinbandfec=1", {}});
@@ -1644,13 +1648,19 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
 
     auto answer = OfferAnswer::createAnswer(offer, answerOpts);
 
+    // Capability-blind mirror: fmtp + rtcp-fb echoed (interim — a codec-aware
+    // MUST-echo/MUST-NOT-echo policy is deferred to tracker 2026-09-02-4); the
+    // extmap direction flip IS applied (offer had no qualifier on a sendrecv
+    // stream => answer stays absent, RFC 8285 §7 — id reused).
     REQUIRE(answer.mediaDescriptions[0].fmtps.size() == 1);
     REQUIRE(answer.mediaDescriptions[0].fmtps[0].parameters == "minptime=10;useinbandfec=1");
     REQUIRE(answer.mediaDescriptions[0].rtcpFeedbacks.size() == 1);
     REQUIRE(answer.mediaDescriptions[0].extMaps.size() == 1);
+    REQUIRE(answer.mediaDescriptions[0].extMaps[0].id == 1);
+    REQUIRE_FALSE(answer.mediaDescriptions[0].extMaps[0].direction.has_value());
   }
 
-  SECTION("fmtps and rtcpFeedbacks NOT copied when supportedCodecs is provided")
+  SECTION("supportedMedia: answer carries the ANSWERER's own fmtp/rtcp-fb, not the offerer's")
   {
     auto offer = makeOffer();
     offer.mediaDescriptions[0].fmtps.push_back({111, "minptime=10", {}});
@@ -1659,17 +1669,27 @@ TEST_CASE("createAnswer", "[offer_answer][answer]")
     AnswerOptions answerOpts;
     answerOpts.iceUfrag = "au";
     answerOpts.icePwd = "ap1234567890123456789012";
-    answerOpts.supportedCodecs = std::vector<RtpMapAttribute>{
+    // Answerer remaps opus to PT 120 and declares its OWN fmtp + rtcp-fb.
+    answerOpts.supportedMedia = MediaDescription{};
+    answerOpts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{
       {120, "opus", 48000, std::uint8_t(2)}
     };
+    answerOpts.supportedMedia->fmtps.push_back({120, "useinbandfec=1", {}});
+    answerOpts.supportedMedia->rtcpFeedbacks.push_back({"120", "transport-cc", {}});
 
     auto answer = OfferAnswer::createAnswer(offer, answerOpts);
+    const auto& am = answer.mediaDescriptions[0];
 
-    // When supportedCodecs provided, only rtpMaps and formats are populated
-    REQUIRE(answer.mediaDescriptions[0].rtpMaps.size() == 1);
-    REQUIRE(answer.mediaDescriptions[0].fmtps.empty());
-    REQUIRE(answer.mediaDescriptions[0].rtcpFeedbacks.empty());
-    REQUIRE(answer.mediaDescriptions[0].extMaps.empty());
+    REQUIRE(am.rtpMaps.size() == 1);
+    REQUIRE(am.rtpMaps[0].payloadType == 120);
+    // fmtp is the ANSWERER's, keyed to the answerer PT — not the offer's 111.
+    REQUIRE(am.fmtps.size() == 1);
+    REQUIRE(am.fmtps[0].payloadType == 120);
+    REQUIRE(am.fmtps[0].parameters == "useinbandfec=1");
+    // rtcp-fb intersection: both declare transport-cc; emitted keyed to 120.
+    REQUIRE(am.rtcpFeedbacks.size() == 1);
+    REQUIRE(am.rtcpFeedbacks[0].payloadType == "120");
+    REQUIRE(am.rtcpFeedbacks[0].type == "transport-cc");
   }
 }
 
@@ -1900,5 +1920,421 @@ TEST_CASE("OfferAnswer: createOffer and createAnswer set no c= at either level",
     {
       REQUIRE(!answer.mediaDescriptions[i].connection.has_value());
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Answerer-declared fmtp / rtcp-fb / extmap negotiation (tracker 2026-07-24-2).
+// createAnswer's supportedMedia branch emits the ANSWERER's own attributes,
+// intersected with the offer and keyed to the answerer PT (RFC 3264 §6,
+// RFC 7587 §7.1, RFC 4585 §4.2, RFC 8285 §7).
+// ---------------------------------------------------------------------------
+TEST_CASE("createAnswer: answerer-declared attribute negotiation",
+          "[offer_answer][codecs][fmtp][rtcp-fb][extmap]")
+{
+  using iora::sdp::AnswerOptions;
+  using iora::sdp::Direction;
+  using iora::sdp::ExtMapAttribute;
+  using iora::sdp::FmtpAttribute;
+  using iora::sdp::MediaDescription;
+  using iora::sdp::MediaType;
+  using iora::sdp::OfferAnswer;
+  using iora::sdp::RtcpFbAttribute;
+  using iora::sdp::RtpMapAttribute;
+  using iora::sdp::SessionDescription;
+  using iora::sdp::TransportProtocol;
+
+  auto audioOffer = [](std::vector<std::string> fmts,
+                       std::vector<RtpMapAttribute> rtpMaps)
+  {
+    SessionDescription offer;
+    MediaDescription m;
+    m.mediaType = MediaType::AUDIO;
+    m.port = 5004;
+    m.protocol = TransportProtocol::RTP_AVP;
+    m.direction = Direction::SENDRECV;
+    m.formats = std::move(fmts);
+    m.rtpMaps = std::move(rtpMaps);
+    offer.mediaDescriptions.push_back(std::move(m));
+    return offer;
+  };
+  auto answererOpts = [](MediaDescription media)
+  {
+    AnswerOptions opts;
+    opts.iceUfrag = "au";
+    opts.icePwd = "ap1234567890123456789012";
+    opts.supportedMedia = std::move(media);
+    return opts;
+  };
+
+  SECTION("T2 opus directional divergence: answer reflects answerer fmtp, not offer's")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].fmtps.push_back({111, "stereo=1;useinbandfec=1", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.fmtps.push_back({111, "stereo=0", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.fmtps.size() == 1);
+    REQUIRE(am.fmtps[0].payloadType == 111);
+    REQUIRE(am.fmtps[0].parameters == "stereo=0");
+  }
+
+  SECTION("T3 telephone-event narrower set: answer carries the answerer's list")
+  {
+    auto offer = audioOffer({"101"}, {{101, "telephone-event", 8000, {}}});
+    offer.mediaDescriptions[0].fmtps.push_back({101, "0-16", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({101, "telephone-event", 8000, {}});
+    cap.fmtps.push_back({101, "0-15", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.fmtps.size() == 1);
+    REQUIRE(am.fmtps[0].parameters == "0-15");
+  }
+
+  SECTION("T4 telephone-event default: answerer declares no fmtp -> answer omits it")
+  {
+    auto offer = audioOffer({"101"}, {{101, "telephone-event", 8000, {}}});
+    offer.mediaDescriptions[0].fmtps.push_back({101, "0-15", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({101, "telephone-event", 8000, {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(answer.mediaDescriptions[0].fmtps.empty());
+  }
+
+  SECTION("T6 rtcp-fb intersection: offer superset (nack, nack pli), answerer nack")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"111", "nack", {}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"111", "nack", std::string("pli")});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.rtcpFeedbacks.push_back({"111", "nack", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& fb = answer.mediaDescriptions[0].rtcpFeedbacks;
+    REQUIRE(fb.size() == 1);
+    REQUIRE(fb[0].type == "nack");
+    REQUIRE_FALSE(fb[0].subtype.has_value());
+  }
+
+  SECTION("T7 rtcp-fb '*' wildcard: both declare '*' -> answer keeps one '*'")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"*", "transport-cc", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.rtcpFeedbacks.push_back({"*", "transport-cc", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& fb = answer.mediaDescriptions[0].rtcpFeedbacks;
+    REQUIRE(fb.size() == 1);
+    REQUIRE(fb[0].payloadType == "*");
+    REQUIRE(fb[0].type == "transport-cc");
+  }
+
+  SECTION("T14 rtcp-fb (type,subtype): offer only generic nack, answerer nack pli -> dropped")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"111", "nack", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.rtcpFeedbacks.push_back({"111", "nack", std::string("pli")});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(answer.mediaDescriptions[0].rtcpFeedbacks.empty());
+  }
+
+  SECTION("T15 rtcp-fb offer-'*' vs answerer-specific -> retained")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"*", "transport-cc", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.rtcpFeedbacks.push_back({"111", "transport-cc", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& fb = answer.mediaDescriptions[0].rtcpFeedbacks;
+    REQUIRE(fb.size() == 1);
+    REQUIRE(fb[0].payloadType == "111");
+    REQUIRE(fb[0].type == "transport-cc");
+  }
+
+  SECTION("T16 rtcp-fb answerer-'*' vs offer-specific -> emitted per-PT")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"111", "nack", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.rtcpFeedbacks.push_back({"*", "nack", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& fb = answer.mediaDescriptions[0].rtcpFeedbacks;
+    REQUIRE(fb.size() == 1);
+    REQUIRE(fb[0].payloadType == "111");
+    REQUIRE(fb[0].type == "nack");
+  }
+
+  SECTION("T8/T20 extmap direction: flip(offer sendrecv) intersect answerer recvonly")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].extMaps.push_back(
+      {2, {}, "urn:ietf:params:rtp-hdrext:ssrc-audio-level", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.extMaps.push_back(
+      {7, Direction::RECVONLY, "urn:ietf:params:rtp-hdrext:ssrc-audio-level", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& ex = answer.mediaDescriptions[0].extMaps;
+    REQUIRE(ex.size() == 1);
+    REQUIRE(ex[0].id == 2); // offer id reused, not the answerer's 7
+    REQUIRE(ex[0].direction.has_value());
+    REQUIRE(ex[0].direction.value() == Direction::RECVONLY);
+  }
+
+  SECTION("T20b extmap incompatible directions -> extension dropped")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    // offer sendonly -> flip -> recvonly; answerer sendonly -> intersect empty.
+    offer.mediaDescriptions[0].extMaps.push_back(
+      {3, Direction::SENDONLY, "urn:ietf:params:rtp-hdrext:sdes:mid", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.extMaps.push_back(
+      {3, Direction::SENDONLY, "urn:ietf:params:rtp-hdrext:sdes:mid", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(answer.mediaDescriptions[0].extMaps.empty());
+  }
+
+  SECTION("T10/T19 extmap URI intersection is case-sensitive")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].extMaps.push_back({1, {}, "urn:ietf:params:rtp-hdrext:A", {}});
+    offer.mediaDescriptions[0].extMaps.push_back({2, {}, "urn:ietf:params:rtp-hdrext:B", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.extMaps.push_back({5, {}, "urn:ietf:params:rtp-hdrext:A", {}});   // exact match
+    cap.extMaps.push_back({6, {}, "urn:ietf:params:rtp-hdrext:b", {}});   // case differs
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& ex = answer.mediaDescriptions[0].extMaps;
+    REQUIRE(ex.size() == 1);
+    REQUIRE(ex[0].uri == "urn:ietf:params:rtp-hdrext:A");
+    REQUIRE(ex[0].id == 1);
+  }
+
+  SECTION("T21 extmap: answerer declares none -> answer omits extmap")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].extMaps.push_back({1, {}, "urn:ietf:params:rtp-hdrext:A", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(answer.mediaDescriptions[0].extMaps.empty());
+  }
+
+  SECTION("T11 static-PT: no orphan attributes, PT unchanged")
+  {
+    auto offer = audioOffer({"0"}, {}); // rtpmap-less static PCMU
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"0", "nack", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({0, "PCMU", 8000, std::uint8_t(1)});
+    // answerer does not declare rtcp-fb -> intersection empty
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.rtpMaps.size() == 1);
+    REQUIRE(am.rtpMaps[0].payloadType == 0);
+    REQUIRE(am.rtcpFeedbacks.empty());
+    REQUIRE(am.fmtps.empty());
+  }
+
+  SECTION("T12 multi-remap: each attribute re-keys to its own answerer PT")
+  {
+    auto offer = audioOffer(
+      {"111", "101"},
+      {{111, "opus", 48000, std::uint8_t(2)}, {101, "telephone-event", 8000, {}}});
+    offer.mediaDescriptions[0].fmtps.push_back({111, "useinbandfec=1", {}});
+    offer.mediaDescriptions[0].fmtps.push_back({101, "0-15", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({120, "opus", 48000, std::uint8_t(2)});
+    cap.rtpMaps.push_back({100, "telephone-event", 8000, {}});
+    cap.fmtps.push_back({120, "useinbandfec=1", {}});
+    cap.fmtps.push_back({100, "0-15", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.fmtps.size() == 2);
+    bool has120 = false, has100 = false;
+    for (const auto& f : am.fmtps)
+    {
+      if (f.payloadType == 120) { has120 = true; REQUIRE(f.parameters == "useinbandfec=1"); }
+      if (f.payloadType == 100) { has100 = true; REQUIRE(f.parameters == "0-15"); }
+    }
+    REQUIRE(has120);
+    REQUIRE(has100);
+  }
+
+  SECTION("T22 flipExtmapDirection non-flip branches")
+  {
+    REQUIRE_FALSE(OfferAnswer::flipExtmapDirection(std::nullopt).has_value());
+    REQUIRE(OfferAnswer::flipExtmapDirection(Direction::SENDRECV).value()
+            == Direction::SENDRECV);
+    REQUIRE(OfferAnswer::flipExtmapDirection(Direction::INACTIVE).value()
+            == Direction::INACTIVE);
+    REQUIRE(OfferAnswer::flipExtmapDirection(Direction::SENDONLY).value()
+            == Direction::RECVONLY);
+    REQUIRE(OfferAnswer::flipExtmapDirection(Direction::RECVONLY).value()
+            == Direction::SENDONLY);
+  }
+
+  SECTION("T23 answerer declares no fmtp for a matched codec -> answer omits it")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].fmtps.push_back({111, "stereo=1;useinbandfec=1", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(answer.mediaDescriptions[0].fmtps.empty());
+  }
+
+  SECTION("T24 non-default telephone-event: answerer MUST emit an explicit list")
+  {
+    auto offer = audioOffer({"101"}, {{101, "telephone-event", 8000, {}}});
+    offer.mediaDescriptions[0].fmtps.push_back({101, "0-16", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({101, "telephone-event", 8000, {}});
+    cap.fmtps.push_back({101, "0-16", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.fmtps.size() == 1);
+    REQUIRE(am.fmtps[0].parameters == "0-16");
+  }
+
+  SECTION("rtcp-fb '*' subsumes a specific-PT entry of the same (type,subtype)")
+  {
+    // Two matched codecs; answerer declares BOTH '* nack' and a specific-PT
+    // 'nack' — the specific expands during the codec loop, then the post-pass
+    // drops it because the section-scoped '*' already covers it (RFC 4585 §5.1).
+    auto offer = audioOffer(
+      {"111", "0"},
+      {{111, "opus", 48000, std::uint8_t(2)}, {0, "PCMU", 8000, std::uint8_t(1)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"*", "nack", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.rtpMaps.push_back({0, "PCMU", 8000, std::uint8_t(1)});
+    cap.rtcpFeedbacks.push_back({"*", "nack", {}});
+    cap.rtcpFeedbacks.push_back({"0", "nack", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& fb = answer.mediaDescriptions[0].rtcpFeedbacks;
+    REQUIRE(fb.size() == 1);
+    REQUIRE(fb[0].payloadType == "*");
+    REQUIRE(fb[0].type == "nack");
+  }
+
+  SECTION("T8 matched flip retained: offer /sendonly, answerer sendrecv -> /recvonly")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].extMaps.push_back(
+      {4, Direction::SENDONLY, "urn:ietf:params:rtp-hdrext:A", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.extMaps.push_back({9, {}, "urn:ietf:params:rtp-hdrext:A", {}}); // answerer sendrecv
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& ex = answer.mediaDescriptions[0].extMaps;
+    REQUIRE(ex.size() == 1);
+    REQUIRE(ex[0].id == 4);
+    REQUIRE(ex[0].direction.value() == Direction::RECVONLY);
+  }
+
+  SECTION("T8b matched flip retained (symmetric): offer /recvonly -> /sendonly")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].extMaps.push_back(
+      {4, Direction::RECVONLY, "urn:ietf:params:rtp-hdrext:A", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.extMaps.push_back({9, {}, "urn:ietf:params:rtp-hdrext:A", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    const auto& ex = answer.mediaDescriptions[0].extMaps;
+    REQUIRE(ex.size() == 1);
+    REQUIRE(ex[0].direction.value() == Direction::SENDONLY);
+  }
+
+  SECTION("T9 mirror-branch flip is discriminating: offer /sendonly -> answer /recvonly")
+  {
+    // No supportedMedia. Offer extmap carries an EXPLICIT direction so a buggy
+    // verbatim copy (the pre-fix defect) would emit /sendonly and fail here.
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].extMaps.push_back(
+      {5, Direction::SENDONLY, "urn:ietf:params:rtp-hdrext:A", {}});
+    AnswerOptions opts;
+    opts.iceUfrag = "au";
+    opts.icePwd = "ap1234567890123456789012";
+    auto answer = OfferAnswer::createAnswer(offer, opts);
+    const auto& ex = answer.mediaDescriptions[0].extMaps;
+    REQUIRE(ex.size() == 1);
+    REQUIRE(ex[0].id == 5);
+    REQUIRE(ex[0].direction.value() == Direction::RECVONLY);
+  }
+
+  SECTION("M2 extmap absent direction inherits the m= stream direction")
+  {
+    // Sendonly stream, extmap with NO qualifier -> effective sendonly ->
+    // flip -> recvonly; answerer sendonly => intersect(recvonly, sendonly) empty
+    // => dropped (RFC 8285 §7). A value_or(SENDRECV) bug would keep it.
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].direction = Direction::SENDONLY;
+    offer.mediaDescriptions[0].extMaps.push_back(
+      {6, {}, "urn:ietf:params:rtp-hdrext:A", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.extMaps.push_back({6, Direction::SENDONLY, "urn:ietf:params:rtp-hdrext:A", {}});
+    auto answer = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(answer.mediaDescriptions[0].extMaps.empty());
+  }
+
+  SECTION("ptime/maxptime: matched branch emits the answerer's own; mirror omits")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].ptime = std::uint32_t(30);
+    offer.mediaDescriptions[0].maxptime = std::uint32_t(60);
+
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.ptime = std::uint32_t(20);
+    cap.maxptime = std::uint32_t(40);
+    auto matched = OfferAnswer::createAnswer(offer, answererOpts(cap));
+    REQUIRE(matched.mediaDescriptions[0].ptime.value() == 20);      // answerer's, not 30
+    REQUIRE(matched.mediaDescriptions[0].maxptime.value() == 40);
+
+    AnswerOptions blind;
+    blind.iceUfrag = "au";
+    blind.icePwd = "ap1234567890123456789012";
+    auto mirror = OfferAnswer::createAnswer(offer, blind);
+    REQUIRE_FALSE(mirror.mediaDescriptions[0].ptime.has_value());   // not echoed
+    REQUIRE_FALSE(mirror.mediaDescriptions[0].maxptime.has_value());
+  }
+
+  SECTION("AnswerOptions::operator== compares supportedMedia")
+  {
+    AnswerOptions a;
+    AnswerOptions b;
+    REQUIRE(a == b);
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    b.supportedMedia = cap;
+    REQUIRE(a != b);            // differ only in supportedMedia
+    a.supportedMedia = cap;
+    REQUIRE(a == b);
+  }
+
+  SECTION("non-mutation: createAnswer leaves the answerer template unchanged")
+  {
+    auto offer = audioOffer({"111"}, {{111, "opus", 48000, std::uint8_t(2)}});
+    offer.mediaDescriptions[0].rtcpFeedbacks.push_back({"*", "transport-cc", {}});
+    MediaDescription cap;
+    cap.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    cap.fmtps.push_back({111, "useinbandfec=1", {}});
+    cap.rtcpFeedbacks.push_back({"111", "transport-cc", {}});
+    cap.extMaps.push_back({7, {}, "urn:ietf:params:rtp-hdrext:A", {}});
+    auto opts = answererOpts(cap);
+    const auto before = opts.supportedMedia;
+    (void)OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(opts.supportedMedia == before);
   }
 }

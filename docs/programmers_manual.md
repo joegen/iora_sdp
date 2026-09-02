@@ -1742,10 +1742,26 @@ struct AnswerOptions
   std::optional<std::string> icePwd;                        // explicit ICE password
   std::optional<FingerprintAttribute> fingerprint;          // DTLS fingerprint
   SetupRole dtlsSetup = SetupRole::ACTIVE;                  // DTLS setup role for answer
-  std::optional<std::vector<RtpMapAttribute>> supportedCodecs;  // codec intersection (absent = accept all)
+  std::optional<MediaDescription> supportedMedia;          // answerer's OWN capabilities
   std::vector<MediaType> rejectMediaTypes;                  // media types to reject (port=0)
 };
 ```
+
+**`supportedMedia` — the answerer's own capability template.** When set, `createAnswer`
+negotiates against the offer and, for each matched codec, emits the **answerer's own**
+`rtpMaps` / `fmtps` / `rtcpFeedbacks` (intersected with the offer, keyed to the answerer's
+payload type) plus the URI-intersected `extMaps` — it never echoes the offerer's attributes
+as the answer's (RFC 3264 §6; RFC 7587 §7.1). Fill the template's `rtpMaps` with the codecs
+you support, `fmtps` with your own format parameters, `rtcpFeedbacks` with the feedback you
+support (matched on the `(type, subtype)` tuple; `*` applies to all PTs, RFC 4585 §5.1),
+`extMaps` with the header extensions you support (case-sensitive URI match; the answer reuses
+the **offer's** id and flips the direction per RFC 8285 §7), and `ptime`/`maxptime` with your
+own packetization preference (RFC 3264 §6.1). When `supportedMedia` is **absent**, the answer
+accepts the offer's codecs as-offered and echoes the offerer's `fmtp`/`rtcp-fb` verbatim, while
+`a=extmap` is carried over with the offer id reused and its direction flipped (RFC 8285 §7 — the
+same extmap handling as the matched branch). This is a capability-blind fallback whose codec-aware
+refinement is tracked separately — a caller needing conformant per-codec negotiation supplies
+`supportedMedia`.
 
 **Code example — rejecting video in an answer:**
 
@@ -1852,9 +1868,12 @@ struct OfferAnswer
   static SessionDescription createOffer(const OfferOptions& options = {});
 
   /// Generate answer from offer: copies groups, creates matching media sections
-  /// with flipped directions. Codec intersection if supportedCodecs provided.
-  /// Media rejection if mediaType in rejectMediaTypes. Application (data channel)
-  /// media sections copied as-is. Auto-generates ICE credentials.
+  /// with flipped directions. If supportedMedia is provided, emits the answerer's
+  /// own fmtp/rtcp-fb/extmap for the negotiated codecs (intersected with the
+  /// offer); otherwise echoes the offer's codecs + fmtp/rtcp-fb, still flipping
+  /// a=extmap direction (RFC 8285 §7). Media rejection if mediaType in
+  /// rejectMediaTypes. Application (data channel) media sections copied as-is.
+  /// Auto-generates ICE credentials.
   static SessionDescription createAnswer(
       const SessionDescription& offer, const AnswerOptions& answerOptions = {});
 };
@@ -2059,13 +2078,16 @@ void negotiate(const std::string& receivedOfferSdp)
   if (!offerResult.hasValue()) return;
   auto& offer = *offerResult.value;
 
-  // 2. Create answer with codec filtering
+  // 2. Create answer declaring the answerer's own capabilities
   AnswerOptions answerOpts;
-  // Only support Opus and VP8
-  answerOpts.supportedCodecs = std::vector<RtpMapAttribute>{
+  // Only support Opus and VP8, declaring our own fmtp/rtcp-fb for them
+  MediaDescription caps;
+  caps.rtpMaps = {
       {111, "opus", 48000, 2},
       {96, "VP8", 90000, {}}
   };
+  caps.fmtps.push_back({111, "useinbandfec=1", {}});   // our own opus params
+  answerOpts.supportedMedia = std::move(caps);
 
   auto answer = OfferAnswer::createAnswer(offer, answerOpts);
 
