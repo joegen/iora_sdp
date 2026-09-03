@@ -1,4 +1,5 @@
 #include <catch2/catch.hpp>
+#include <algorithm>
 #include <regex>
 #include <set>
 #include <string>
@@ -516,19 +517,34 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
     REQUIRE(result.empty());
   }
 
-  SECTION("3.4 CN (PT 13) with no rtpmap is NOT synthesized as an audio codec")
+  SECTION("3.4 CN (PT 13) rtpmap-less IS synthesized as CN/8000 and joins (tracker 2026-07-27-1)")
   {
+    // RFC 3551 Table 4: PT 13 = CN/8000. RFC 4566 §6: a=rtpmap is OPTIONAL for a
+    // static PT, so a bare '13' is conformant (dominant CUCM / carrier-SBC wire
+    // form). AUDIO-gated: mediaType MUST be AUDIO for synthesis (the
+    // `synthesizeStatics` gate in normalizeStaticFormats). NOTE this section
+    // formerly asserted the OPPOSITE ("NOT synthesized")
+    // and passed VACUOUSLY only because its fixture left mediaType=UNKNOWN, gating
+    // synthesis off regardless of the switch — inverted per cpp17 step-0 H-1.
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"13"};
-    MediaDescription answer;
-    answer.rtpMaps.push_back({13, "CN", 8000, {}});
-
-    // The offer's bare CN is not synthesized, so nothing to join against.
-    auto result = OfferAnswer::matchCodecs(offer, answer);
-    REQUIRE(result.empty());
 
     auto norm = OfferAnswer::normalizeStaticFormats(offer);
-    REQUIRE(norm.empty());
+    REQUIRE(norm.size() == 1);
+    REQUIRE(norm[0].payloadType == 13);
+    REQUIRE(norm[0].encodingName == "CN");
+    REQUIRE(norm[0].clockRate == 8000);
+    REQUIRE_FALSE(norm[0].channels.has_value()); // byte-identical to bare CN/8000
+
+    // Both sides carry bare CN -> matchCodecs retains it.
+    MediaDescription answer;
+    answer.mediaType = MediaType::AUDIO;
+    answer.formats = {"13"};
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 1);
+    REQUIRE(result[0].encodingName == "CN");
+    REQUIRE(result[0].payloadType == 13);
   }
 
   SECTION("3.5 G.722 (PT 9) synthesizes with the RFC 3551 §4.5.2 8000 RTP clock")
@@ -543,17 +559,88 @@ TEST_CASE("normalizeStaticFormats and matchCodecs — static PT scenarios",
     REQUIRE_FALSE(norm[0].channels.has_value());
   }
 
-  SECTION("3.6 NEGATIVE: G.729 (PT 18) rtpmap-less is NOT synthesized / does NOT join")
+  SECTION("3.6 NEGATIVE: G.729 (PT 18) rtpmap-less is NOT synthesized / does NOT join (no decoder, RFC 3264 §6.1)")
   {
+    // mediaType=AUDIO so this GENUINELY exercises impliedStaticRtpMap's
+    // `default: return nullopt` (18 has no case) — NOT the audio gate. It must
+    // FAIL if someone adds `case 18`. iora renders no G.729; never advertise it.
+    // (Formerly left mediaType=UNKNOWN and passed vacuously — cpp17 step-0 H-2.)
     MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
     offer.formats = {"18"};
     auto norm = OfferAnswer::normalizeStaticFormats(offer);
-    REQUIRE(norm.empty()); // iora decodes no G.729 — never advertise it (RFC 3264 §6.1)
+    REQUIRE(norm.empty());
 
     MediaDescription answer;
+    answer.mediaType = MediaType::AUDIO;
     answer.rtpMaps.push_back({18, "G729", 8000, {}});
     auto result = OfferAnswer::matchCodecs(offer, answer);
     REQUIRE(result.empty());
+  }
+
+  SECTION("3.6b CN cross-operand: bare-13 offer vs explicit a=rtpmap:13 answer intersects (tracker 4c)")
+  {
+    // matchCodecs normalizes each operand INDEPENDENTLY: the offer's bare 13
+    // synthesizes CN, the answer's explicit a=rtpmap:13 is used as-is, and the
+    // intersection returns the ANSWERER's entry (matchCodecs pushes answerCodec) —
+    // there is NO synthesized-vs-explicit reconciliation ACROSS operands (not a dedup).
+    MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
+    offer.formats = {"13"}; // bare -> synthesized
+    MediaDescription answer;
+    answer.mediaType = MediaType::AUDIO;
+    answer.rtpMaps.push_back({13, "CN", 8000, {}}); // explicit
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 1);
+    REQUIRE(result[0].encodingName == "CN");
+    REQUIRE(result[0].payloadType == 13);
+  }
+
+  SECTION("3.6c CN within-section: explicit a=rtpmap:13 wins over synthesized via PASS1 (tracker 4e)")
+  {
+    // ONE section listing 13 in formats AND carrying an explicit a=rtpmap:13
+    // CN/8000/1: PASS1 findRtpMap short-circuits before the synthesis branch, so
+    // exactly the EXPLICIT entry (channels=1) survives — no duplicate synthesized
+    // nullopt entry is appended.
+    MediaDescription media;
+    media.mediaType = MediaType::AUDIO;
+    media.formats = {"13"};
+    media.rtpMaps.push_back({13, "CN", 8000, std::uint8_t(1)});
+    auto norm = OfferAnswer::normalizeStaticFormats(media);
+    REQUIRE(norm.size() == 1);
+    REQUIRE(norm[0].payloadType == 13);
+    REQUIRE(norm[0].encodingName == "CN");
+    REQUIRE(norm[0].channels.has_value());
+    REQUIRE(norm[0].channels.value() == 1);
+  }
+
+  SECTION("3.6d CN coexists with a dynamic audio codec: opus/111 + bare 13 both normalize (tracker 4f)")
+  {
+    // A real dynamic-PT codec (explicit a=rtpmap:111 opus/48000) plus a bare static
+    // CN/13: normalizeStaticFormats yields BOTH; matchCodecs (answerer has both)
+    // retains BOTH. The recv-clock-follows-the-decodable-codec assertion lives in
+    // the iora_media co-land test (tracker 2026-07-27-1 item 6), not here.
+    MediaDescription offer;
+    offer.mediaType = MediaType::AUDIO;
+    offer.formats = {"111", "13"};
+    offer.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    auto norm = OfferAnswer::normalizeStaticFormats(offer);
+    REQUIRE(norm.size() == 2);
+    bool hasOpus = false, hasCn = false;
+    for (const auto& r : norm)
+    {
+      hasOpus |= (r.encodingName == "opus" && r.clockRate == 48000);
+      hasCn |= (r.encodingName == "CN" && r.clockRate == 8000);
+    }
+    REQUIRE(hasOpus);
+    REQUIRE(hasCn);
+
+    MediaDescription answer;
+    answer.mediaType = MediaType::AUDIO;
+    answer.formats = {"111", "13"};
+    answer.rtpMaps.push_back({111, "opus", 48000, std::uint8_t(2)});
+    auto result = OfferAnswer::matchCodecs(offer, answer);
+    REQUIRE(result.size() == 2);
   }
 
   SECTION("3.9 non-mutation: matchCodecs and normalizeStaticFormats leave the input unchanged")
@@ -732,6 +819,17 @@ TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answe
     return offer;
   };
 
+  // Option-A answerer capabilities (mediaType=AUDIO invariant named once); the
+  // meaningful rtpMap list stays at each call site.
+  auto answererCaps = [](std::vector<RtpMapAttribute> maps)
+  {
+    AnswerOptions opts;
+    opts.supportedMedia = MediaDescription{};
+    opts.supportedMedia->mediaType = MediaType::AUDIO;
+    opts.supportedMedia->rtpMaps = std::move(maps);
+    return opts;
+  };
+
   SECTION("3.7 supportedMedia branch: answers a real port + explicit rtpmap, not port 0/INACTIVE")
   {
     SessionDescription offer = makeStaticOffer({"0", "8"});
@@ -791,6 +889,129 @@ TEST_CASE("createAnswer — rtpmap-less static offer produces a conformant answe
     opts.supportedMedia->rtpMaps = std::vector<RtpMapAttribute>{{0, "PCMU", 8000, {}}};
     (void)OfferAnswer::createAnswer(offer, opts);
     REQUIRE(offer == offerBefore); // SessionDescription operator== deep-compares
+  }
+
+  // "some rtpMap has encodingName CN" — reused by the presence/absence sections.
+  auto answerHasCn = [](const SessionDescription& a)
+  {
+    const auto& maps = a.mediaDescriptions[0].rtpMaps;
+    return std::any_of(maps.begin(), maps.end(),
+                       [](const RtpMapAttribute& r) { return r.encodingName == "CN"; });
+  };
+
+  SECTION("M-1 createAnswer emits CN at PT 13 alongside a real codec (answer_shape c2, tracker 2026-07-27-1)")
+  {
+    // Bare-static offer PCMU + CN (the dominant CUCM / carrier-SBC wire form).
+    // The answerer supports both and declares CN at the RFC 3551 static PT 13; the
+    // answer MUST retain CN. If this fails, the remedy is to supply the answerer's
+    // CN capability — NEVER to weaken the assertion.
+    SessionDescription offer = makeStaticOffer({"0", "13"});
+    AnswerOptions opts = answererCaps({{0, "PCMU", 8000, {}}, {13, "CN", 8000, {}}});
+
+    SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.port != 0);
+    REQUIRE(am.direction != Direction::INACTIVE);
+    REQUIRE(std::any_of(am.rtpMaps.begin(), am.rtpMaps.end(),
+      [](const RtpMapAttribute& r)
+      { return r.payloadType == 13 && r.encodingName == "CN" && r.clockRate == 8000; }));
+    // CN must NOT be advertised as the primary codec — PCMU precedes CN in the
+    // answerer-preference-ordered fmt list (RFC 3264 §6). (sip step-4 LOW-1)
+    auto idx0 = std::find(am.formats.begin(), am.formats.end(), "0");
+    auto idx13 = std::find(am.formats.begin(), am.formats.end(), "13");
+    REQUIRE(idx0 != am.formats.end());
+    REQUIRE(idx13 != am.formats.end());
+    REQUIRE(idx0 < idx13);
+    // Serialized form carries the EXACT bare a=rtpmap:13 CN/8000 line (no /N suffix,
+    // CRLF-terminated — pins channels-absence on the wire). (sip step-4 LOW-2)
+    const std::string text = SdpSerializer::serialize(answer);
+    REQUIRE(text.find("a=rtpmap:13 CN/8000\r\n") != std::string::npos);
+  }
+
+  SECTION("M-2 createAnswer port-0/INACTIVE for a CN-only offer when the answerer lacks CN (RFC 3264 §6)")
+  {
+    // No common MEDIA codec (answerer has PCMU, offer is CN-only): iora_sdp
+    // rejects the stream with port 0 / INACTIVE, preserving the m= section — it
+    // NEVER 488s the session (a SIP-layer decision).
+    SessionDescription offer = makeStaticOffer({"13"});
+    AnswerOptions opts = answererCaps({{0, "PCMU", 8000, {}}});
+    SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.port == 0);
+    REQUIRE(am.direction == Direction::INACTIVE);
+  }
+
+  SECTION("createAnswer is a faithful RFC 3264 §6 primitive: CN-only offer + CN answerer -> LIVE CN-only answer (DD-createAnswer-no-non-media-guard)")
+  {
+    // Pins the HUMAN-SIGNED design decision (tracker 2026-07-27-1): createAnswer
+    // does NOT filter for media-worthiness. A CN-only offer against a CN-capable
+    // answerer yields a LIVE (non-port-0) answer carrying only CN. Media-worthiness
+    // (a CN-only stream carries no speech) is the CONSUMER's policy (iora_media
+    // 488s / port-0s it), NOT this SDP primitive's. Do NOT "fix" this into a
+    // non-media port-0 guard here — that would push media-plane codec knowledge
+    // into the wrong layer.
+    SessionDescription offer = makeStaticOffer({"13"});
+    AnswerOptions opts = answererCaps({{13, "CN", 8000, {}}});
+    SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.mediaDescriptions.size() == 1);
+    const auto& am = answer.mediaDescriptions[0];
+    REQUIRE(am.port != 0);
+    REQUIRE(am.direction != Direction::INACTIVE);
+    REQUIRE(am.rtpMaps.size() == 1);
+    REQUIRE(am.rtpMaps[0].encodingName == "CN");
+    REQUIRE(am.rtpMaps[0].payloadType == 13);
+  }
+
+  SECTION("createAnswer is stateless across re-offers: CN present then dropped (RFC 3264 §8, tracker 4g)")
+  {
+    AnswerOptions opts = answererCaps({{0, "PCMU", 8000, {}}, {13, "CN", 8000, {}}});
+
+    SessionDescription a1 = OfferAnswer::createAnswer(makeStaticOffer({"0", "13"}), opts);
+    REQUIRE(answerHasCn(a1));
+
+    // CN dropped in the re-offer -> answer has no CN (per-offer stateless).
+    SessionDescription a2 = OfferAnswer::createAnswer(makeStaticOffer({"0"}), opts);
+    REQUIRE_FALSE(answerHasCn(a2));
+  }
+
+  SECTION("createAnswer under hold: CN survives a sendonly offer with flipped direction (RFC 3264 §8.4, tracker 4h)")
+  {
+    SessionDescription offer = makeStaticOffer({"0", "13"});
+    offer.mediaDescriptions[0].direction = Direction::SENDONLY;
+    AnswerOptions opts = answererCaps({{0, "PCMU", 8000, {}}, {13, "CN", 8000, {}}});
+    SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
+    REQUIRE(answer.mediaDescriptions[0].direction == Direction::RECVONLY); // flipped
+    REQUIRE(answerHasCn(answer));
+  }
+
+  SECTION("createAnswer: bare 13 -> CN does not collide with telephone-event (RFC 4733, tracker 4i)")
+  {
+    // A bare '13' resolves to CN (static) while an explicit a=rtpmap:101
+    // telephone-event/8000 coexists; the two must NOT be conflated. Guards against
+    // a future edit adding a spurious static telephone-event mapping.
+    SessionDescription offer = makeStaticOffer({"13", "101"});
+    offer.mediaDescriptions[0].rtpMaps.push_back({101, "telephone-event", 8000, {}});
+    AnswerOptions opts = answererCaps({{13, "CN", 8000, {}}, {101, "telephone-event", 8000, {}}});
+    SessionDescription answer = OfferAnswer::createAnswer(offer, opts);
+    const auto& am = answer.mediaDescriptions[0];
+    // EXACTLY the two intersected codecs — no phantom synthesized static entry.
+    REQUIRE(am.rtpMaps.size() == 2);
+    bool hasCn = false, hasTev = false;
+    for (const auto& r : am.rtpMaps)
+    {
+      if (r.payloadType == 13)
+      {
+        hasCn |= (r.encodingName == "CN");
+      }
+      if (r.payloadType == 101)
+      {
+        hasTev |= detail::iequals(r.encodingName, "telephone-event");
+      }
+    }
+    REQUIRE(hasCn);
+    REQUIRE(hasTev);
   }
 }
 

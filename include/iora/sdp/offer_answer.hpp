@@ -418,16 +418,27 @@ struct OfferAnswer
   }
 
   /// The implied a=rtpmap for a payload type that arrived WITHOUT one, for the
-  /// RFC 3551 static assignments iora negotiates. RFC 4566 section 6 makes
-  /// a=rtpmap optional for statically-assigned PTs; real endpoints (CUCM, older
-  /// Avaya/Polycom, carrier SBCs) omit it. Scope is bounded to the codecs
-  /// iora_media decodes — the authority for this set is the iora_media decoder
-  /// registry (payload_format_registry). G.729 (18) and CN (13) are deliberately
-  /// excluded (no G.729 decoder; CN is not a media codec, RFC 3389). channels is
-  /// left unset so a synthesized entry is byte-identical to a parsed bare
-  /// "PCMU/8000" (RFC 4566 section 6: an omitted channel count means one).
-  /// G.722 (9) uses the RFC 3551 section 4.5.2 8000 RTP clock despite 16 kHz
-  /// sampling. See tracker 2026-07-23-2 design decision D4.
+  /// RFC 3551 static AUDIO assignments iora SIGNALS on the wire. RFC 4566 section
+  /// 6 makes a=rtpmap optional for statically-assigned PTs; real endpoints (CUCM,
+  /// older Avaya/Polycom, carrier SBCs) omit it. Membership in this set is a
+  /// SYNTACTIC RFC 3551 / RFC 4566 question (what does this PT MEAN on the wire?)
+  /// and is DISTINCT from decode capability (can iora_media render it?), which is
+  /// enforced separately downstream via the iora_media registry
+  /// (PayloadFormatRegistry::canResolve). The test is "does iora negotiate this
+  /// static audio assignment?", NOT "does iora_media decode it?".
+  ///   - CN (13) is IN the set: RFC 3389 Comfort Noise needs NO decoder to be
+  ///     correctly echoed in an answer or classified on the receive path (the
+  ///     receiver synthesizes noise locally), so its normalization is independent
+  ///     of decode capability. See tracker 2026-07-27-1.
+  ///   - G.729 (18) is OUT: a genuine decode-capability concern — synthesizing it
+  ///     would advertise a codec we cannot render (inbound G.729 undecodable).
+  ///     Keep excluded until a G.729 IPayloadFormat ships.
+  /// channels is left unset so a synthesized entry is byte-identical to a parsed
+  /// bare "PCMU/8000" / "CN/8000" (RFC 4566 section 6: an omitted channel count
+  /// means one). The byte-identity is form-specific — an explicit "CN/8000/1"
+  /// parses channels=1 — but matchCodecs compares only encodingName+clockRate, so
+  /// the intersection still succeeds. G.722 (9) uses the RFC 3551 section 4.5.2
+  /// 8000 RTP clock despite 16 kHz sampling. See tracker 2026-07-23-2 D4.
   /// Not noexcept: constructs a std::string encodingName (SSO-safe for these
   /// literals, but the return type owns heap storage in general).
   static std::optional<RtpMapAttribute> impliedStaticRtpMap(std::uint8_t pt)
@@ -437,6 +448,7 @@ struct OfferAnswer
       case 0: return RtpMapAttribute{0, "PCMU", 8000, std::nullopt};
       case 8: return RtpMapAttribute{8, "PCMA", 8000, std::nullopt};
       case 9: return RtpMapAttribute{9, "G722", 8000, std::nullopt};
+      case 13: return RtpMapAttribute{13, "CN", 8000, std::nullopt};
       default: return std::nullopt;
     }
   }
@@ -764,6 +776,17 @@ struct OfferAnswer
   ///
   /// As with createOffer, no c= is set at either level — the caller supplies
   /// the answer's connection address (RFC 4566 §5.7).
+  ///
+  /// MEDIA-WORTHINESS IS THE CONSUMER'S JOB, NOT THIS PRIMITIVE'S (tracker
+  /// 2026-07-27-1, DD-createAnswer-no-non-media-guard). createAnswer is a faithful
+  /// RFC 3264 §6 intersection: given an offer whose only format is a companion
+  /// payload (RFC 3389 CN, RFC 4733 telephone-event, red) and an answerer that
+  /// supports it, this emits a LIVE (non-port-0) answer stream carrying only that
+  /// format. Deciding whether such a stream is worth a live port — a CN-only
+  /// stream carries no speech — is a MEDIA-PLANE policy owned by the consumer
+  /// (e.g. iora_media, which returns 488 / port-0 when hasAudioSendCodec() is
+  /// false). This primitive deliberately does NOT classify media-worthiness, so it
+  /// never duplicates the media registry's codec knowledge into the SDP layer.
   static SessionDescription createAnswer(const SessionDescription& offer,
                                           const AnswerOptions& answerOptions = {})
   {
