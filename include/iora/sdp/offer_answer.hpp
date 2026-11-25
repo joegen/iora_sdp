@@ -9,9 +9,11 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "iora/sdp/sdp_parser.hpp"
 #include "iora/sdp/session_description.hpp"
 
 namespace iora {
@@ -148,8 +150,8 @@ struct OfferAnswer
   /// sess-version "1". Shared by createOffer/createAnswer so the minting
   /// invariant has one home. NOTE: this is initial-offer scaffolding — a re-offer
   /// within an existing session (RFC 3264 §8) must keep the same sess-id and use
-  /// a GREATER sess-version, which is the caller's responsibility, not this
-  /// helper's.
+  /// a GREATER sess-version: use nextSessionVersion for the +1, and
+  /// answerReofferFromOwnOffer to answer a re-offer from this UA's own last offer.
   static Origin freshOrigin()
   {
     Origin o;
@@ -159,6 +161,65 @@ struct OfferAnswer
     o.sessId = std::to_string(dist(gen));
     o.sessVersion = "1";
     return o;
+  }
+
+  /// Text compare: true when the two SDP texts are equal once their o= lines are
+  /// left out. Lines are split by detail::splitLines (CRLF, LF, or a bare CR when
+  /// no LF follows), empty lines are skipped, lines that start with 'o=' are
+  /// dropped, and the other lines are compared in order, byte for byte (RFC 4028
+  /// §7.4; RFC 3264 §8). It does not check that the texts are valid SDP.
+  static bool equalIgnoringOriginLine(std::string_view first, std::string_view second)
+  {
+    auto keptLines = [](std::string_view text)
+    {
+      std::vector<std::string_view> kept;
+      for (auto line : detail::splitLines(text))
+      {
+        if (line.empty())
+        {
+          continue;
+        }
+        if (line.size() >= 2 && line[0] == 'o' && line[1] == '=')
+        {
+          continue;
+        }
+        kept.push_back(line);
+      }
+      return kept;
+    };
+    return keptLines(first) == keptLines(second);
+  }
+
+  /// Adds one to an o= sess-version, a decimal digit string of any length
+  /// (RFC 4566 §5.2, §9: 1*DIGIT, no bound). Works on the digits, with carry, and
+  /// never converts to an integer. Returns std::nullopt when the input is not
+  /// 1*DIGIT.
+  static std::optional<std::string> nextSessionVersion(std::string_view version)
+  {
+    if (version.empty())
+    {
+      return std::nullopt;
+    }
+    for (char c : version)
+    {
+      if (c < '0' || c > '9')
+      {
+        return std::nullopt;
+      }
+    }
+    std::string result(version);
+    for (std::size_t i = result.size(); i > 0; --i)
+    {
+      if (result[i - 1] == '9')
+      {
+        result[i - 1] = '0';
+        continue;
+      }
+      ++result[i - 1];
+      return result;
+    }
+    result.insert(result.begin(), '1');
+    return result;
   }
 
   /// Flip an SDP direction for offer/answer per RFC 3264.

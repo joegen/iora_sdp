@@ -31,6 +31,7 @@ add_executable(sdp_tests
   test_effective_direction.cpp
   test_unknown_proto_media.cpp
   test_media_port_parse.cpp
+  test_reoffer_answer.cpp
 )
 
 target_link_libraries(sdp_tests PRIVATE
