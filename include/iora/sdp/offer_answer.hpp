@@ -139,6 +139,30 @@ struct DataChannelOptions
   }
 };
 
+/// The answer to a peer's re-offer, built from this UA's own last offer
+/// (OfferAnswer::answerReofferFromOwnOffer).
+struct ReofferAnswer
+{
+  /// Equal to ownOffer when differsFromOwnOffer is false; otherwise ownOffer
+  /// narrowed to what the re-offer kept (RFC 3264 §6, §8), with the
+  /// o= version raised by one.
+  SessionDescription answer;
+  /// false: ownOffer already answers the re-offer as it is; send ownOffer's
+  /// stored bytes unchanged.
+  bool differsFromOwnOffer = false;
+
+  bool operator==(const ReofferAnswer& other) const noexcept
+  {
+    return answer == other.answer
+        && differsFromOwnOffer == other.differsFromOwnOffer;
+  }
+
+  bool operator!=(const ReofferAnswer& other) const noexcept
+  {
+    return !(*this == other);
+  }
+};
+
 /// Stateless offer/answer utility functions for SDP operations.
 /// All methods are static — the struct is non-instantiable.
 struct OfferAnswer
@@ -220,6 +244,367 @@ struct OfferAnswer
     }
     result.insert(result.begin(), '1');
     return result;
+  }
+
+  /// Builds an RFC 3264 answer to a peer's re-offer of an unchanged session from
+  /// this UA's own last offer in that session (RFC 3264 §8), by narrowing the
+  /// own offer to what the re-offer kept. Returns std::nullopt when the re-offer
+  /// does not fit the own offer or a rule cannot decide (the caller should
+  /// reject the re-offer, for example with SIP 488).
+  static std::optional<ReofferAnswer> answerReofferFromOwnOffer(
+      const SessionDescription& reoffer, const SessionDescription& ownOffer)
+  {
+    // S1 (RA-SC-8): the answer keeps ownOffer's origin, so one must exist.
+    if (!ownOffer.origin.has_value())
+    {
+      return std::nullopt;
+    }
+
+    // S2: a BUNDLE re-offer is not answered here (NR-9, RA-SC-9); session-level
+    // capability negotiation or key management in ownOffer is not answer-neutral
+    // (RA-SC-17 (ii)).
+    for (const auto& group : reoffer.groups)
+    {
+      if (detail::iequals(group.semantics, "BUNDLE"))
+      {
+        return std::nullopt;
+      }
+    }
+    if (hasReofferBlockingAttribute(ownOffer.attributes, false))
+    {
+      return std::nullopt;
+    }
+
+    // S3 (NR-1, RA-SC-13): same m-line count and media type at each index; on a
+    // line the re-offer keeps, the same protocol and a consistent mid.
+    const std::size_t lineCount = ownOffer.mediaDescriptions.size();
+    if (reoffer.mediaDescriptions.size() != lineCount)
+    {
+      return std::nullopt;
+    }
+    for (std::size_t i = 0; i < lineCount; ++i)
+    {
+      const auto& own = ownOffer.mediaDescriptions[i];
+      const auto& re = reoffer.mediaDescriptions[i];
+      if (own.mediaType != re.mediaType
+          || (own.mediaType == MediaType::UNKNOWN && own.rawMediaType != re.rawMediaType))
+      {
+        return std::nullopt;
+      }
+      if (re.port == 0)
+      {
+        continue;
+      }
+      if (own.protocol != re.protocol
+          || (own.protocol == TransportProtocol::UNKNOWN && own.rawProtocol != re.rawProtocol))
+      {
+        return std::nullopt;
+      }
+      if (re.mid.has_value() && (!own.mid.has_value() || *own.mid != *re.mid))
+      {
+        return std::nullopt;
+      }
+    }
+
+    // S4.
+    SessionDescription answer = ownOffer;
+
+    struct LineResult
+    {
+      bool rejected = false;
+      Direction direction = Direction::SENDRECV;
+      std::optional<SetupRole> setupRole;
+    };
+    std::vector<LineResult> results(lineCount);
+
+    // S5: per line.
+    for (std::size_t i = 0; i < lineCount; ++i)
+    {
+      const auto& own = ownOffer.mediaDescriptions[i];
+      const auto& re = reoffer.mediaDescriptions[i];
+      auto& out = answer.mediaDescriptions[i];
+      auto& result = results[i];
+
+      // S5a (NR-2, RA-SC-15 (b)).
+      if (re.port == 0)
+      {
+        if (own.port != 0)
+        {
+          out = rejectedAnswerMedia(re);
+        }
+        result.rejected = true;
+        continue;
+      }
+
+      // S5b (RA-SC-2, RA-SC-18).
+      if (own.port == 0 || own.mediaType == MediaType::IMAGE)
+      {
+        return std::nullopt;
+      }
+
+      // S5c (NR-3, RA-SC-1, RA-SC-10, RA-SC-15 (a), RA-SC-20).
+      std::vector<std::pair<std::string, std::string>> chosenBy;
+      if (!answerReofferFormats(own, re, out, chosenBy))
+      {
+        return std::nullopt;
+      }
+
+      // S5d (NR-5, RA-SC-5).
+      if (!own.crypto.empty())
+      {
+        if (re.crypto.empty())
+        {
+          out.crypto.clear();
+        }
+        else
+        {
+          std::optional<CryptoAttribute> picked;
+          for (const auto& reCrypto : re.crypto)
+          {
+            for (const auto& ownCrypto : own.crypto)
+            {
+              if (ownCrypto.tag == reCrypto.tag)
+              {
+                picked = ownCrypto;
+                break;
+              }
+            }
+            if (picked.has_value())
+            {
+              break;
+            }
+          }
+          if (!picked.has_value())
+          {
+            return std::nullopt;
+          }
+          out.crypto = {*picked};
+        }
+      }
+
+      // S5e (NR-7 media level, RA-SC-7, RA-SC-17, RA-SC-19).
+      if (re.simulcast.has_value() || !re.rids.empty())
+      {
+        return std::nullopt;
+      }
+      if (hasReofferBlockingAttribute(own.genericAttributes, true) || isBfcpLine(own))
+      {
+        return std::nullopt;
+      }
+      out.rtcpMux = own.rtcpMux && re.rtcpMux;
+      out.rtcpMuxOnly = false;
+      out.rtcpRsize = own.rtcpRsize && re.rtcpRsize;
+      out.extMaps.erase(
+        std::remove_if(out.extMaps.begin(), out.extMaps.end(),
+          [&](const ExtMapAttribute& ownExt)
+          {
+            return std::none_of(re.extMaps.begin(), re.extMaps.end(),
+              [&](const ExtMapAttribute& reExt) { return reExt.uri == ownExt.uri; });
+          }),
+        out.extMaps.end());
+      out.extmapAllowMixed =
+        own.extmapAllowMixed && (re.extmapAllowMixed || reoffer.extmapAllowMixed);
+      out.simulcast.reset();
+      out.rids.clear();
+      filterReofferRtcpFeedback(re, chosenBy, out);
+
+      // S5f (NR-6, RA-SC-3, RA-SC-14) and the a=tls-id rule.
+      const std::optional<SetupRole> reSetup = re.setup.has_value() ? re.setup : reoffer.setup;
+      const std::optional<SetupRole> ownSetup = own.setup.has_value() ? own.setup : ownOffer.setup;
+      const bool ownIsDtls = !own.fingerprints.empty() || !ownOffer.fingerprints.empty();
+      if (ownSetup.has_value())
+      {
+        if (!reSetup.has_value())
+        {
+          if (ownIsDtls)
+          {
+            return std::nullopt;
+          }
+        }
+        else
+        {
+          SetupRole computed;
+          switch (*reSetup)
+          {
+            case SetupRole::ACTIVE: computed = SetupRole::PASSIVE; break;
+            case SetupRole::PASSIVE: computed = SetupRole::ACTIVE; break;
+            default: return std::nullopt;
+          }
+          if (*ownSetup != SetupRole::ACTPASS && *ownSetup != computed)
+          {
+            return std::nullopt;
+          }
+          result.setupRole = computed;
+        }
+      }
+      const auto isTlsId = [](const GenericAttribute& attribute) { return attribute.name == "tls-id"; };
+      if (std::none_of(re.genericAttributes.begin(), re.genericAttributes.end(), isTlsId))
+      {
+        out.genericAttributes.erase(
+          std::remove_if(out.genericAttributes.begin(), out.genericAttributes.end(), isTlsId),
+          out.genericAttributes.end());
+      }
+
+      // S5g (NR-4).
+      const auto directions = intersectDirections(
+        flipDirection(*reoffer.effectiveDirection(i)), *ownOffer.effectiveDirection(i));
+      if (!directions.first)
+      {
+        result.direction = Direction::INACTIVE;
+      }
+      else
+      {
+        result.direction = directions.second.value_or(Direction::SENDRECV);
+      }
+    }
+
+    // S6 (RA-SC-4): fold-down of the directions and the DTLS roles.
+    bool directionsUnchanged = true;
+    bool rolesUnchanged = true;
+    for (std::size_t i = 0; i < lineCount; ++i)
+    {
+      if (results[i].rejected)
+      {
+        continue;
+      }
+      if (results[i].direction != *ownOffer.effectiveDirection(i))
+      {
+        directionsUnchanged = false;
+      }
+      const auto& own = ownOffer.mediaDescriptions[i];
+      const std::optional<SetupRole> ownSetup = own.setup.has_value() ? own.setup : ownOffer.setup;
+      if (results[i].setupRole.has_value() && results[i].setupRole != ownSetup)
+      {
+        rolesUnchanged = false;
+      }
+    }
+    if (!directionsUnchanged)
+    {
+      answer.direction.reset();
+      for (std::size_t i = 0; i < lineCount; ++i)
+      {
+        if (!results[i].rejected)
+        {
+          answer.mediaDescriptions[i].direction = results[i].direction;
+        }
+      }
+    }
+    if (!rolesUnchanged)
+    {
+      answer.setup.reset();
+      for (std::size_t i = 0; i < lineCount; ++i)
+      {
+        if (results[i].rejected)
+        {
+          continue;
+        }
+        const auto& own = ownOffer.mediaDescriptions[i];
+        answer.mediaDescriptions[i].setup = results[i].setupRole.has_value()
+          ? results[i].setupRole
+          : (own.setup.has_value() ? own.setup : ownOffer.setup);
+      }
+    }
+
+    // S7 (NR-7 session level, RA-SC-7, RA-SC-9, RA-SC-16).
+    const auto namesLiveAnswerLine = [&](const std::string& mid)
+    {
+      for (std::size_t i = 0; i < lineCount; ++i)
+      {
+        const auto& line = answer.mediaDescriptions[i];
+        if (!results[i].rejected && line.mid.has_value() && *line.mid == mid)
+        {
+          return true;
+        }
+      }
+      return false;
+    };
+    answer.groups.clear();
+    for (const auto& ownGroup : ownOffer.groups)
+    {
+      GroupAttribute kept;
+      kept.semantics = ownGroup.semantics;
+      bool semanticsInReoffer = false;
+      for (const auto& reGroup : reoffer.groups)
+      {
+        if (!detail::iequals(reGroup.semantics, ownGroup.semantics))
+        {
+          continue;
+        }
+        semanticsInReoffer = true;
+        for (const auto& mid : ownGroup.mids)
+        {
+          const bool inReGroup =
+            std::find(reGroup.mids.begin(), reGroup.mids.end(), mid) != reGroup.mids.end();
+          const bool alreadyKept =
+            std::find(kept.mids.begin(), kept.mids.end(), mid) != kept.mids.end();
+          if (inReGroup && !alreadyKept && namesLiveAnswerLine(mid))
+          {
+            kept.mids.push_back(mid);
+          }
+        }
+      }
+      if (semanticsInReoffer && !kept.mids.empty())
+      {
+        std::vector<std::string> ordered;
+        for (const auto& mid : ownGroup.mids)
+        {
+          if (std::find(kept.mids.begin(), kept.mids.end(), mid) != kept.mids.end()
+              && std::find(ordered.begin(), ordered.end(), mid) == ordered.end())
+          {
+            ordered.push_back(mid);
+          }
+        }
+        kept.mids = std::move(ordered);
+        answer.groups.push_back(std::move(kept));
+      }
+    }
+    answer.extmapAllowMixed = ownOffer.extmapAllowMixed && reoffer.extmapAllowMixed;
+
+    bool reofferShowsIce = false;
+    for (std::size_t i = 0; i < lineCount && !reofferShowsIce; ++i)
+    {
+      if (results[i].rejected)
+      {
+        continue;
+      }
+      const auto& re = reoffer.mediaDescriptions[i];
+      const bool hasUfrag = re.iceUfrag.has_value() || reoffer.iceUfrag.has_value();
+      const bool hasPwd = re.icePwd.has_value() || reoffer.icePwd.has_value();
+      reofferShowsIce = hasUfrag && hasPwd;
+    }
+    if (!reofferShowsIce)
+    {
+      answer.iceUfrag.reset();
+      answer.icePwd.reset();
+      answer.iceOptions.clear();
+      answer.iceLite = false;
+      for (std::size_t i = 0; i < lineCount; ++i)
+      {
+        if (results[i].rejected)
+        {
+          continue;
+        }
+        auto& out = answer.mediaDescriptions[i];
+        out.candidates.clear();
+        out.iceUfrag.reset();
+        out.icePwd.reset();
+        out.iceOptions.clear();
+        out.endOfCandidates = false;
+      }
+    }
+
+    // S8 (NR-8, RA-SC-6).
+    const bool differs = answer != ownOffer;
+    if (differs)
+    {
+      auto version = nextSessionVersion(ownOffer.origin->sessVersion);
+      if (!version.has_value())
+      {
+        return std::nullopt;
+      }
+      answer.origin->sessVersion = std::move(*version);
+    }
+    return ReofferAnswer{std::move(answer), differs};
   }
 
   /// Flip an SDP direction for offer/answer per RFC 3264.
@@ -893,26 +1278,6 @@ struct OfferAnswer
     // BUNDLE/WebRTC consumer must NOT route BUNDLE offers through this generic
     // primitive (see tasks 2026-07-25-2 disposition C, 2026-09-02-5/6).
 
-    // A port-0 INACTIVE reject that echoes the offer's <media>/<proto> (incl. the
-    // raw wire token for an UNKNOWN profile — empty for a recognized one), its fmt
-    // list, and mid. The fmt list is copied verbatim: usually >=1 (RFC 4566 §5.14),
-    // but a fmt-less port-0 removal offer legitimately carries zero — the
-    // serializer supplies the mandatory placeholder fmt on output. Shared by the
-    // UNKNOWN fail-safe and the normal decline: both produce the identical
-    // rejected-stream wire shape (RFC 3264 §6/§8.2).
-    const auto rejectEcho = [](const MediaDescription& off)
-    {
-      MediaDescription a;
-      a.mediaType = off.mediaType;
-      a.rawMediaType = off.rawMediaType;
-      a.protocol = off.protocol;
-      a.rawProtocol = off.rawProtocol;
-      a.port = 0;
-      a.formats = off.formats;
-      a.direction = Direction::INACTIVE;
-      a.mid = off.mid;
-      return a;
-    };
 
     // Indexed loop so the offer's effective (session-level-folded) direction can
     // be resolved per media via offer.effectiveDirection(i).
@@ -930,7 +1295,7 @@ struct OfferAnswer
       // round-trips (never a "" toString).
       if (offerMedia.hasUnknownProfile())
       {
-        session.mediaDescriptions.push_back(rejectEcho(offerMedia));
+        session.mediaDescriptions.push_back(rejectedAnswerMedia(offerMedia));
         continue;
       }
 
@@ -945,7 +1310,7 @@ struct OfferAnswer
       // not this generic primitive).
       if (offerMedia.mediaType == MediaType::IMAGE)
       {
-        session.mediaDescriptions.push_back(rejectEcho(offerMedia));
+        session.mediaDescriptions.push_back(rejectedAnswerMedia(offerMedia));
         continue;
       }
 
@@ -964,7 +1329,7 @@ struct OfferAnswer
 
       if (declined)
       {
-        answerMedia = rejectEcho(offerMedia);
+        answerMedia = rejectedAnswerMedia(offerMedia);
       }
       else if (offerMedia.mediaType == MediaType::APPLICATION)
       {
@@ -1161,6 +1526,264 @@ struct OfferAnswer
     }
 
     return session;
+  }
+
+private:
+  // A port-0 INACTIVE reject that echoes the offer's <media>/<proto> (incl. the
+  // raw wire token for an UNKNOWN profile — empty for a recognized one), its fmt
+  // list, and mid. The fmt list is copied verbatim: usually >=1 (RFC 4566 §5.14),
+  // but a fmt-less port-0 removal offer legitimately carries zero — the
+  // serializer supplies the mandatory placeholder fmt on output. Shared by
+  // createAnswer (the UNKNOWN fail-safe and the normal decline) and
+  // answerReofferFromOwnOffer: all produce the identical rejected-stream wire
+  // shape (RFC 3264 §6/§8.2).
+  static MediaDescription rejectedAnswerMedia(const MediaDescription& offerMedia)
+  {
+    MediaDescription a;
+    a.mediaType = offerMedia.mediaType;
+    a.rawMediaType = offerMedia.rawMediaType;
+    a.protocol = offerMedia.protocol;
+    a.rawProtocol = offerMedia.rawProtocol;
+    a.port = 0;
+    a.formats = offerMedia.formats;
+    a.direction = Direction::INACTIVE;
+    a.mid = offerMedia.mid;
+    return a;
+  }
+
+  // RA-SC-17: generic attributes whose answer is not ownOffer's value. At session
+  // level: RFC 5939 capability negotiation (tcap, acap, pcfg) and RFC 4567
+  // key-mgmt. At media level also BFCP floorctrl (RFC 8856). Names compare
+  // exactly, as the parser stores them.
+  static bool hasReofferBlockingAttribute(const std::vector<GenericAttribute>& attributes,
+                                          bool mediaLevel)
+  {
+    for (const auto& attribute : attributes)
+    {
+      if (attribute.name == "tcap" || attribute.name == "acap" || attribute.name == "pcfg"
+          || attribute.name == "key-mgmt" || (mediaLevel && attribute.name == "floorctrl"))
+      {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // RA-SC-17 (i): a BFCP line (RFC 8856, RFC 8857): an UNKNOWN protocol whose
+  // raw token ends in "/BFCP", compared without case.
+  static bool isBfcpLine(const MediaDescription& media)
+  {
+    static constexpr std::string_view BFCP_SUFFIX = "/BFCP";
+    if (media.protocol != TransportProtocol::UNKNOWN
+        || media.rawProtocol.size() < BFCP_SUFFIX.size())
+    {
+      return false;
+    }
+    return detail::iequals(
+      std::string_view(media.rawProtocol).substr(media.rawProtocol.size() - BFCP_SUFFIX.size()),
+      BFCP_SUFFIX);
+  }
+
+  // NR-3 for one line (with RA-SC-1, RA-SC-10, RA-SC-15 (a) and RA-SC-20).
+  // Writes the kept formats into `out` and records, in `chosenBy`, the re-offer
+  // token that chose each kept own token. Returns false when no answer exists.
+  static bool answerReofferFormats(const MediaDescription& own,
+                                   const MediaDescription& re,
+                                   MediaDescription& out,
+                                   std::vector<std::pair<std::string, std::string>>& chosenBy)
+  {
+    // RA-SC-10: each distinct token once, at its first position (numeric tokens
+    // by payload type number).
+    auto distinctTokens = [](const std::vector<std::string>& formats)
+    {
+      std::vector<std::string> tokens;
+      std::vector<std::uint8_t> numbers;
+      for (const auto& token : formats)
+      {
+        const auto pt = formatToPayloadType(token);
+        if (pt.has_value())
+        {
+          if (std::find(numbers.begin(), numbers.end(), *pt) != numbers.end())
+          {
+            continue;
+          }
+          numbers.push_back(*pt);
+        }
+        else if (std::find(tokens.begin(), tokens.end(), token) != tokens.end())
+        {
+          continue;
+        }
+        tokens.push_back(token);
+      }
+      return tokens;
+    };
+
+    const auto ownCodecs = normalizeStaticFormats(own);
+    const auto reCodecs = normalizeStaticFormats(re);
+    auto codecOf = [](const std::vector<RtpMapAttribute>& codecs,
+                      const std::string& token) -> const RtpMapAttribute*
+    {
+      const auto pt = formatToPayloadType(token);
+      if (!pt.has_value())
+      {
+        return nullptr;
+      }
+      for (const auto& codec : codecs)
+      {
+        if (codec.payloadType == *pt)
+        {
+          return &codec;
+        }
+      }
+      return nullptr;
+    };
+
+    static constexpr std::uint8_t STATIC_RANGE_END = 35;
+    const auto ownTokens = distinctTokens(own.formats);
+    std::vector<std::string> chosenOwn;
+    chosenBy.clear();
+
+    for (const auto& reToken : distinctTokens(re.formats))
+    {
+      const RtpMapAttribute* reCodec = codecOf(reCodecs, reToken);
+      const auto rePt = formatToPayloadType(reToken);
+      std::vector<std::string> candidates;
+      for (const auto& ownToken : ownTokens)
+      {
+        const RtpMapAttribute* ownCodec = codecOf(ownCodecs, ownToken);
+        const auto ownPt = formatToPayloadType(ownToken);
+        const bool samePt = rePt.has_value() && ownPt.has_value() && *rePt == *ownPt;
+        bool match = false;
+        if (reCodec != nullptr && ownCodec != nullptr)
+        {
+          match = (detail::iequals(reCodec->encodingName, ownCodec->encodingName)
+                   && reCodec->clockRate == ownCodec->clockRate)
+               || (samePt && *rePt < STATIC_RANGE_END);
+        }
+        else
+        {
+          match = reToken == ownToken || samePt;
+        }
+        if (match)
+        {
+          candidates.push_back(ownToken);
+        }
+      }
+
+      if (candidates.empty())
+      {
+        continue;
+      }
+      std::string chosen;
+      if (candidates.size() == 1)
+      {
+        chosen = candidates.front();
+      }
+      else
+      {
+        bool found = false;
+        for (const auto& candidate : candidates)
+        {
+          const auto candidatePt = formatToPayloadType(candidate);
+          if (rePt.has_value() && candidatePt.has_value() && *candidatePt == *rePt)
+          {
+            chosen = candidate;
+            found = true;
+            break;
+          }
+        }
+        if (!found)
+        {
+          return false;
+        }
+      }
+      if (std::find(chosenOwn.begin(), chosenOwn.end(), chosen) != chosenOwn.end())
+      {
+        return false;
+      }
+      chosenOwn.push_back(chosen);
+      chosenBy.emplace_back(chosen, reToken);
+    }
+
+    std::vector<std::string> kept;
+    for (const auto& ownToken : ownTokens)
+    {
+      if (std::find(chosenOwn.begin(), chosenOwn.end(), ownToken) != chosenOwn.end())
+      {
+        kept.push_back(ownToken);
+      }
+    }
+    if (kept.empty())
+    {
+      return false;
+    }
+    if (kept != ownTokens)
+    {
+      out.formats = kept;
+      std::vector<std::uint8_t> retained;
+      for (const auto& token : kept)
+      {
+        const auto pt = formatToPayloadType(token);
+        if (pt.has_value())
+        {
+          retained.push_back(*pt);
+        }
+      }
+      pruneUnusedCodecs(out, retained);
+    }
+    return true;
+  }
+
+  // RA-SC-19: an own rtcp-fb entry of a kept format stays only where the
+  // re-offer carries the same feedback for the format that chose it (RFC 4585
+  // §4.2: the answer never adds feedback). A '*' entry stays only when every
+  // kept numeric format has it. Other entries are left as they are.
+  static void filterReofferRtcpFeedback(
+      const MediaDescription& re,
+      const std::vector<std::pair<std::string, std::string>>& chosenBy,
+      MediaDescription& out)
+  {
+    std::vector<std::pair<std::uint8_t, std::uint8_t>> keptNumbers;
+    for (const auto& [ownToken, reToken] : chosenBy)
+    {
+      const auto ownPt = formatToPayloadType(ownToken);
+      const auto rePt = formatToPayloadType(reToken);
+      if (ownPt.has_value() && rePt.has_value())
+      {
+        keptNumbers.emplace_back(*ownPt, *rePt);
+      }
+    }
+    out.rtcpFeedbacks.erase(
+      std::remove_if(out.rtcpFeedbacks.begin(), out.rtcpFeedbacks.end(),
+        [&](const RtcpFbAttribute& feedback)
+        {
+          if (feedback.payloadType == "*")
+          {
+            for (const auto& [ownPt, rePt] : keptNumbers)
+            {
+              (void)ownPt;
+              if (!hasRtcpFb(re, rePt, feedback.type, feedback.subtype))
+              {
+                return true;
+              }
+            }
+            return false;
+          }
+          const auto pt = formatToPayloadType(feedback.payloadType);
+          if (!pt.has_value())
+          {
+            return false;
+          }
+          for (const auto& [ownPt, rePt] : keptNumbers)
+          {
+            if (ownPt == *pt)
+            {
+              return !hasRtcpFb(re, rePt, feedback.type, feedback.subtype);
+            }
+          }
+          return false;
+        }),
+      out.rtcpFeedbacks.end());
   }
 };
 
