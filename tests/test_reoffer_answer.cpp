@@ -624,6 +624,15 @@ TEST_CASE("SDES picks the own key the re-offer kept (NR-5, RA-SC-5)", "[reoffer_
   REQUIRE(suiteThenMatch->answer.mediaDescriptions[0].crypto[0]
           == ownFrom(own).mediaDescriptions[0].crypto[0]);
 
+  // RA-SC-5: the FIRST matching re-offer a=crypto (in order) is picked.
+  auto twoMatches = answerFor(
+      "m=audio 6000 RTP/SAVP 0\na=crypto:3 AES_256_CM_HMAC_SHA1_80 " + KEY1 + "\n"
+      "a=crypto:1 AES_CM_128_HMAC_SHA1_80 " + KEY2 + "\n", own);
+  requireChangedVersion(twoMatches);
+  REQUIRE(twoMatches->answer.mediaDescriptions[0].crypto.size() == 1);
+  REQUIRE(twoMatches->answer.mediaDescriptions[0].crypto[0]
+          == ownFrom(own).mediaDescriptions[0].crypto[2]);
+
   const std::string plain = "m=audio 5000 RTP/SAVP 0\n";
   requireUnchanged(
       answerFor("m=audio 6000 RTP/SAVP 0\na=crypto:1 AES_CM_128_HMAC_SHA1_80 " + KEY1 + "\n",
