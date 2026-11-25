@@ -746,6 +746,13 @@ TEST_CASE("Groups follow the re-offer (NR-7, RA-SC-9)", "[reoffer_answer][groups
       three);
   requireChangedVersion(empty);
   REQUIRE(empty->answer.groups.empty());
+
+  // RA-SC-21 (DQ-RA-3 = A): a mid repeated in one own a=group line is kept
+  // once, at its first position.
+  auto repeated = answerFor("a=group:LS 0 1\n" + reLines, "a=group:LS 0 0 1\n" + lines);
+  requireChangedVersion(repeated);
+  REQUIRE(repeated->answer.groups.size() == 1);
+  REQUIRE(repeated->answer.groups[0].mids == std::vector<std::string>{"0", "1"});
 }
 
 TEST_CASE("Unknown attributes are kept (DQ-MD-5 = A)", "[reoffer_answer][generic]")
