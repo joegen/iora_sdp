@@ -753,6 +753,7 @@ TEST_CASE("ICE fields are dropped when the re-offer shows no ICE (RA-SC-16)", "[
   requireIceCleared(answerFor("m=audio 6000 RTP/AVP 0\n", own));
   requireUnchanged(answerFor("m=audio 6000 RTP/AVP 0\na=ice-ufrag:peer\na=ice-pwd:peerpassword0123456789abc\n", own), own);
   requireIceCleared(answerFor("m=audio 6000 RTP/AVP 0\na=candidate:1 1 udp 2130706431 198.51.100.7 6000 typ host\n", own));
+  requireIceCleared(answerFor("m=audio 6000 RTP/AVP 0\na=ice-ufrag:peer\n", own));
   requireUnchanged(answerFor("a=ice-ufrag:peer\nm=audio 6000 RTP/AVP 0\na=ice-pwd:peerpassword0123456789abc\n", own), own);
 
   const std::string withPortZero = own +
