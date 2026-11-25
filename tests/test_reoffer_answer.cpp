@@ -1,5 +1,11 @@
 #include <catch2/catch.hpp>
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "iora/sdp/offer_answer.hpp"
 #include "iora/sdp/sdp_parser.hpp"
@@ -907,4 +913,636 @@ TEST_CASE("Setup fold-down with lines that compute no role (RA-SC-4)", "[reoffer
 
   const std::string plain = "a=setup:actpass\nm=audio 5000 RTP/AVP 0\nm=audio 5002 RTP/AVP 8\n";
   requireUnchanged(answerFor("m=audio 6000 RTP/AVP 0\nm=audio 6002 RTP/AVP 8\n", plain), plain);
+}
+
+// ---------------------------------------------------------------------------
+// Task 1.4: RA-T-25 real-SDP round trips and RA-T-26 totality
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct RealSample
+{
+  std::string name;
+  std::string ownOffer;
+  std::vector<std::string> peerAnswers;
+};
+
+// The peer's re-offer is its last answer with the o= version raised by one.
+std::string reofferFrom(const std::string& peerAnswer)
+{
+  return replaceAll(peerAnswer, "o=peer 2 3 IN", "o=peer 2 4 IN");
+}
+
+const std::string CARRIER_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.10
+t=0 0
+a=sendrecv
+m=audio 20000 RTP/AVP 0 8 18 13 101
+a=fmtp:18 annexb=no
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=ptime:20
+a=maxptime:40
+)";
+
+const std::string CARRIER_ANSWER_ALL = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.20
+s=-
+c=IN IP4 198.51.100.20
+t=0 0
+m=audio 30000 RTP/AVP 0 8 18 13 101
+a=fmtp:18 annexb=no
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=ptime:20
+a=sendrecv
+)";
+
+const std::string CARRIER_ANSWER_NARROW = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.20
+s=-
+c=IN IP4 198.51.100.20
+t=0 0
+m=audio 30000 RTP/AVP 0 101
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=ptime:20
+a=sendrecv
+)";
+
+const std::string RTPENGINE_OFFER = R"(v=0
+o=- 1 9 IN IP4 203.0.113.5
+s=rtpengine
+c=IN IP4 203.0.113.5
+t=0 0
+m=audio 30000 RTP/SAVP 0 8 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=sendrecv
+a=rtcp:30001
+a=ssrc:12345 cname:rtpengine0
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw
+a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNk
+a=ice-ufrag:rtpe
+a=ice-pwd:rtpenginepassword012345
+a=candidate:1 1 UDP 2130706431 203.0.113.5 30000 typ host
+a=candidate:1 2 UDP 2130706430 203.0.113.5 30001 typ host
+)";
+
+const std::string RTPENGINE_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.21
+s=-
+c=IN IP4 198.51.100.21
+t=0 0
+m=audio 31000 RTP/SAVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=sendrecv
+a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMy
+)";
+
+const std::string TEAMS_OFFER = R"(v=0
+o=- 1 9 IN IP4 203.0.113.7
+s=session
+c=IN IP4 203.0.113.7
+b=CT:10000000
+t=0 0
+m=audio 52000 RTP/SAVP 0 8 97 13 101
+a=rtcp:52001
+a=ice-ufrag:tUfr
+a=ice-pwd:teamsPassword0123456789ab
+a=candidate:1 1 UDP 2130706431 203.0.113.7 52000 typ host
+a=candidate:2 1 tcp-act 2121006078 203.0.113.7 52010 typ srflx raddr 10.0.0.1 rport 52010
+a=candidate:3 1 TCP-PASS 2121006079 203.0.113.7 52011 typ srflx raddr 10.0.0.1 rport 52011
+a=x-ssrc-range:1000-1000
+a=label:main-audio
+a=x-source:main-audio
+a=rtcp-mux
+a=rtcp-rsize
+a=rtcp-fb:* x-message app send:dsh recv:dsh
+a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw|2^31|1:1
+a=crypto:3 AES_CM_128_HMAC_SHA1_80 inline:QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNk|2^31
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:97 RED/8000
+a=rtpmap:13 CN/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=ptime:20
+)";
+
+const std::string TEAMS_ANSWER_NON_ICE = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.22
+s=-
+c=IN IP4 198.51.100.22
+t=0 0
+m=audio 32000 RTP/SAVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=rtcp-mux
+a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMy
+)";
+
+const std::string TEAMS_ANSWER_ICE_LITE = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.22
+s=-
+c=IN IP4 198.51.100.22
+t=0 0
+a=ice-lite
+m=audio 32000 RTP/SAVP 0 101
+a=rtpmap:0 PCMU/8000
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+a=rtcp-mux
+a=rtcp-rsize
+a=rtcp-fb:* x-message app send:dsh recv:dsh
+a=ice-ufrag:sbcU
+a=ice-pwd:sbcpassword0123456789abcd
+a=candidate:1 1 UDP 2130706431 198.51.100.22 32000 typ host
+a=crypto:3 AES_CM_128_HMAC_SHA1_80 inline:ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMy
+)";
+
+const std::string T38_REINVITE_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 0 RTP/AVP 0
+m=image 20002 udptl t38
+a=T38FaxVersion:0
+a=T38MaxBitRate:14400
+a=T38FaxRateManagement:transferredTCF
+a=T38FaxMaxBuffer:262
+a=T38FaxMaxDatagram:176
+a=T38FaxUdpEC:t38UDPRedundancy
+)";
+
+const std::string T38_REINVITE_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.23
+s=-
+c=IN IP4 198.51.100.23
+t=0 0
+m=audio 0 RTP/AVP 0
+m=image 33002 udptl t38
+a=T38FaxVersion:0
+a=T38MaxBitRate:14400
+a=T38FaxRateManagement:transferredTCF
+a=T38FaxMaxBuffer:262
+a=T38FaxMaxDatagram:176
+a=T38FaxUdpEC:t38UDPRedundancy
+)";
+
+const std::string VIDEO_REJECTED_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 20000 RTP/AVP 0 101
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+m=video 20002 RTP/AVP 96
+a=rtpmap:96 H264/90000
+a=fmtp:96 profile-level-id=42e01f;packetization-mode=1
+)";
+
+const std::string VIDEO_REJECTED_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.24
+s=-
+c=IN IP4 198.51.100.24
+t=0 0
+m=audio 34000 RTP/AVP 0 101
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-16
+m=video 0 RTP/AVP 96
+)";
+
+const std::string OPUS_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 20000 RTP/AVP 111 100 101
+a=rtpmap:111 opus/48000/2
+a=fmtp:111 minptime=10;useinbandfec=1
+a=rtpmap:100 telephone-event/8000
+a=fmtp:100 0-15
+a=rtpmap:101 telephone-event/48000
+a=fmtp:101 0-15
+)";
+
+const std::string OPUS_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.25
+s=-
+c=IN IP4 198.51.100.25
+t=0 0
+m=audio 35000 RTP/AVP 109 101
+a=rtpmap:109 opus/48000/2
+a=rtpmap:101 telephone-event/8000
+a=fmtp:101 0-15
+)";
+
+const std::string T38_SINGLE_SLOT_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=image 20004 udptl t38
+a=T38FaxVersion:0
+a=T38MaxBitRate:14400
+a=T38FaxUdpEC:t38UDPRedundancy
+)";
+
+const std::string T38_SINGLE_SLOT_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.26
+s=-
+c=IN IP4 198.51.100.26
+t=0 0
+m=image 36004 udptl t38
+a=T38FaxVersion:0
+a=T38MaxBitRate:14400
+a=T38FaxUdpEC:t38UDPRedundancy
+)";
+
+const std::string CAPNEG_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+m=audio 20000 RTP/AVP 0
+a=tcap:1 RTP/SAVP
+a=acap:1 crypto:1 AES_CM_128_HMAC_SHA1_80 inline:MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkw
+a=pcfg:1 t=1 a=1
+)";
+
+const std::string CAPNEG_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.27
+s=-
+c=IN IP4 198.51.100.27
+t=0 0
+m=audio 37000 RTP/SAVP 0
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMy
+a=acfg:1 t=1 a=1
+)";
+
+const std::string WEBRTC_OFFER = R"(v=0
+o=- 1 9 IN IP4 192.0.2.1
+s=-
+c=IN IP4 192.0.2.1
+t=0 0
+a=setup:actpass
+a=fingerprint:sha-256 AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89
+a=ice-ufrag:wUfr
+a=ice-pwd:webrtcpassword0123456789
+m=audio 9000 UDP/TLS/RTP/SAVPF 111
+a=mid:0
+a=rtpmap:111 opus/48000/2
+a=rtcp-mux
+a=rtcp-rsize
+a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+a=extmap:3 urn:ietf:params:rtp-hdrext:sdes:mid
+a=msid:stream0 audio0
+a=ssrc:1111 cname:webrtc0
+a=candidate:1 1 udp 2130706431 192.0.2.1 9000 typ host
+m=video 9002 UDP/TLS/RTP/SAVPF 96
+a=mid:1
+a=rtpmap:96 VP8/90000
+a=rtcp-mux
+a=rtcp-rsize
+a=rtcp-fb:96 nack
+a=rtcp-fb:96 nack pli
+a=rtcp-fb:96 ccm fir
+a=rtcp-fb:96 goog-remb
+a=rtcp-fb:96 transport-cc
+a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time
+a=extmap:3 urn:ietf:params:rtp-hdrext:sdes:mid
+a=extmap:4 urn:3gpp:video-orientation
+a=msid:stream0 video0
+a=ssrc:2222 cname:webrtc0
+a=candidate:1 1 udp 2130706431 192.0.2.1 9002 typ host
+)";
+
+const std::string WEBRTC_ANSWER = R"(v=0
+o=peer 2 3 IN IP4 198.51.100.28
+s=-
+c=IN IP4 198.51.100.28
+t=0 0
+a=fingerprint:sha-256 01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF
+a=ice-ufrag:pUfr
+a=ice-pwd:peerwebrtcpassword012345
+m=audio 38000 UDP/TLS/RTP/SAVPF 111
+a=mid:0
+a=setup:active
+a=rtpmap:111 opus/48000/2
+a=rtcp-mux
+a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level
+a=candidate:1 1 udp 2130706431 198.51.100.28 38000 typ host
+m=video 38002 UDP/TLS/RTP/SAVPF 96
+a=mid:1
+a=setup:active
+a=rtpmap:96 VP8/90000
+a=rtcp-mux
+a=rtcp-fb:96 nack pli
+a=rtcp-fb:96 ccm fir
+a=extmap:3 urn:ietf:params:rtp-hdrext:sdes:mid
+a=candidate:1 1 udp 2130706431 198.51.100.28 38002 typ host
+)";
+
+const std::string WEBRTC_BUNDLE_OFFER = replaceAll(WEBRTC_OFFER, "t=0 0\n", "t=0 0\na=group:BUNDLE 0 1\n");
+const std::string WEBRTC_BUNDLE_ANSWER = replaceAll(WEBRTC_ANSWER, "t=0 0\n", "t=0 0\na=group:BUNDLE 0 1\n");
+
+std::vector<RealSample> realSamples()
+{
+  return {
+    {"(1) carrier trunk", CARRIER_OFFER, {CARRIER_ANSWER_ALL, CARRIER_ANSWER_NARROW}},
+    {"(2) rtpengine SDES", RTPENGINE_OFFER, {RTPENGINE_ANSWER}},
+    {"(3) Teams-style SDES", TEAMS_OFFER, {TEAMS_ANSWER_NON_ICE, TEAMS_ANSWER_ICE_LITE}},
+    {"(4) T.38 re-INVITE", T38_REINVITE_OFFER, {T38_REINVITE_ANSWER}},
+    {"(5) video rejected", VIDEO_REJECTED_OFFER, {VIDEO_REJECTED_ANSWER}},
+    {"(6) opus with two telephone-event rates", OPUS_OFFER, {OPUS_ANSWER}},
+    {"(7) single-slot T.38", T38_SINGLE_SLOT_OFFER, {T38_SINGLE_SLOT_ANSWER}},
+    {"(8) RFC 5939 capneg", CAPNEG_OFFER, {CAPNEG_ANSWER}},
+    {"(9) WebRTC non-BUNDLE", WEBRTC_OFFER, {WEBRTC_ANSWER}},
+    {"(9b) WebRTC BUNDLE", WEBRTC_BUNDLE_OFFER, {WEBRTC_BUNDLE_ANSWER}},
+  };
+}
+
+// Answers the re-offer built from `peerAnswer`, after checking the AD-9
+// precondition (the re-offer equals the peer's answer apart from its o= line).
+std::optional<ReofferAnswer> answerSample(const std::string& ownOffer, const std::string& peerAnswer)
+{
+  const std::string reoffer = reofferFrom(peerAnswer);
+  REQUIRE(reoffer != peerAnswer);
+  REQUIRE(OfferAnswer::equalIgnoringOriginLine(peerAnswer, reoffer));
+  return OfferAnswer::answerReofferFromOwnOffer(mustParse(reoffer), mustParse(ownOffer));
+}
+
+// Known gap: the serializer writes a=fmtp only for formats that have an
+// a=rtpmap (tasks/iora_sdp/backlog/2026-11-25-3), so the round trip loses the
+// a=fmtp of a bare static payload type. The expected model drops those lines;
+// the fix of 2026-11-25-3 removes this adjustment.
+SessionDescription withoutFmtpOfFormatsLackingRtpMap(SessionDescription session)
+{
+  for (auto& media : session.mediaDescriptions)
+  {
+    media.fmtps.erase(
+      std::remove_if(media.fmtps.begin(), media.fmtps.end(),
+        [&](const FmtpAttribute& fmtp) { return !hasRtpMap(media, fmtp.payloadType); }),
+      media.fmtps.end());
+  }
+  return session;
+}
+
+// Common checks of RA-T-25 for an answer that has a value.
+std::string commonChecks(const ReofferAnswer& result, bool skipCandidateLines)
+{
+  const std::string text = SdpSerializer::serialize(result.answer);
+  auto reparsed = SdpParser::parse(text);
+  REQUIRE(reparsed.hasValue());
+  REQUIRE(*reparsed.value == withoutFmtpOfFormatsLackingRtpMap(result.answer));
+  for (const auto& attribute : result.answer.attributes)
+  {
+    REQUIRE(text.find(SdpSerializer::serializeAttribute(attribute)) != std::string::npos);
+  }
+  for (const auto& media : result.answer.mediaDescriptions)
+  {
+    for (const auto& attribute : media.genericAttributes)
+    {
+      if (skipCandidateLines && attribute.name == "candidate")
+      {
+        continue;
+      }
+      REQUIRE(text.find(SdpSerializer::serializeAttribute(attribute)) != std::string::npos);
+    }
+  }
+  return text;
+}
+
+bool contains(const std::string& text, const std::string& part)
+{
+  return text.find(part) != std::string::npos;
+}
+
+std::string readBinary(const std::filesystem::path& path)
+{
+  std::ifstream in(path, std::ios::binary);
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+} // namespace
+
+TEST_CASE("Real SDP samples round trip through the re-offer answer (RA-T-25)", "[reoffer_answer][real_sdp]")
+{
+  SECTION("(1) carrier trunk, answer that accepts everything")
+  {
+    auto result = answerSample(CARRIER_OFFER, CARRIER_ANSWER_ALL);
+    REQUIRE(result.has_value());
+    REQUIRE_FALSE(result->differsFromOwnOffer);
+    REQUIRE(result->answer == mustParse(CARRIER_OFFER));
+    const auto text = commonChecks(*result, false);
+    // Known-gap pin (tasks/iora_sdp/backlog/2026-11-25-3): the answer model keeps
+    // a=fmtp:18 annexb=no, but the serializer drops it. The fix flips this check.
+    REQUIRE(hasFmtp(result->answer.mediaDescriptions[0], 18));
+    REQUIRE_FALSE(contains(text, "a=fmtp:18"));
+  }
+  SECTION("(1) carrier trunk, answer that keeps 0 101")
+  {
+    auto result = answerSample(CARRIER_OFFER, CARRIER_ANSWER_NARROW);
+    requireChangedVersion(result);
+    const auto text = commonChecks(*result, false);
+    const auto& line = result->answer.mediaDescriptions[0];
+    REQUIRE(line.formats == Formats{"0", "101"});
+    for (int pt : {8, 18, 13})
+    {
+      REQUIRE_FALSE(hasRtpMap(line, pt));
+      REQUIRE_FALSE(hasFmtp(line, pt));
+    }
+    REQUIRE_FALSE(contains(text, "annexb"));
+    REQUIRE(contains(text, "a=fmtp:101 0-16"));
+    REQUIRE(contains(text, "a=ptime:20"));
+    REQUIRE(contains(text, "a=maxptime:40"));
+    REQUIRE(result->answer.connection == mustParse(CARRIER_OFFER).connection);
+  }
+  SECTION("(2) rtpengine SDES")
+  {
+    auto result = answerSample(RTPENGINE_OFFER, RTPENGINE_ANSWER);
+    requireChangedVersion(result);
+    const auto text = commonChecks(*result, false);
+    const auto& line = result->answer.mediaDescriptions[0];
+    REQUIRE(line.crypto.size() == 1);
+    REQUIRE(line.crypto[0] == mustParse(RTPENGINE_OFFER).mediaDescriptions[0].crypto[1]);
+    REQUIRE_FALSE(contains(text, "a=candidate"));
+    REQUIRE_FALSE(contains(text, "a=ice-"));
+    REQUIRE(contains(text, "a=rtcp:30001"));
+    REQUIRE(contains(text, "a=ssrc:12345"));
+  }
+  SECTION("(3a) Teams-style SDES, non-ICE SBC answer")
+  {
+    auto result = answerSample(TEAMS_OFFER, TEAMS_ANSWER_NON_ICE);
+    requireChangedVersion(result);
+    const auto text = commonChecks(*result, false);
+    REQUIRE(result->answer.mediaDescriptions[0].crypto.size() == 1);
+    REQUIRE(result->answer.mediaDescriptions[0].crypto[0].tag == 2);
+    REQUIRE_FALSE(contains(text, "a=candidate"));
+    REQUIRE_FALSE(contains(text, "a=ice-ufrag"));
+    REQUIRE_FALSE(contains(text, "a=ice-pwd"));
+    REQUIRE_FALSE(contains(text, "x-message"));
+    REQUIRE_FALSE(contains(text, "a=rtcp-rsize"));
+    REQUIRE(contains(text, "a=x-ssrc-range:1000-1000"));
+    REQUIRE(contains(text, "a=x-source:main-audio"));
+    REQUIRE(contains(text, "a=label:main-audio"));
+  }
+  SECTION("(3b) Teams-style SDES, ICE-lite SBC answer")
+  {
+    auto result = answerSample(TEAMS_OFFER, TEAMS_ANSWER_ICE_LITE);
+    requireChangedVersion(result);
+    const auto text = commonChecks(*result, true);
+    const auto own = mustParse(TEAMS_OFFER).mediaDescriptions[0];
+    const auto& line = result->answer.mediaDescriptions[0];
+    REQUIRE(line.crypto.size() == 1);
+    REQUIRE(line.crypto[0].tag == 3);
+    REQUIRE(line.iceUfrag == own.iceUfrag);
+    REQUIRE(line.icePwd == own.icePwd);
+    REQUIRE(line.candidates == own.candidates);
+    REQUIRE(contains(text, "a=rtcp-fb:* x-message app send:dsh recv:dsh"));
+    REQUIRE(contains(text, "a=rtcp-rsize"));
+    // Known gap RA-RK-5: the parser stores tcp-act / TCP-PASS as udp.
+    // tasks/iora_sdp/backlog/2026-11-25-2 flips these two checks.
+    REQUIRE_FALSE(contains(text, "tcp-act"));
+    REQUIRE_FALSE(contains(text, "TCP-PASS"));
+  }
+  SECTION("(4) T.38 re-INVITE and (7) single-slot T.38 have no answer (RA-SC-18)")
+  {
+    REQUIRE_FALSE(answerSample(T38_REINVITE_OFFER, T38_REINVITE_ANSWER).has_value());
+    REQUIRE_FALSE(answerSample(T38_SINGLE_SLOT_OFFER, T38_SINGLE_SLOT_ANSWER).has_value());
+  }
+  SECTION("(5) video rejected by the peer")
+  {
+    auto result = answerSample(VIDEO_REJECTED_OFFER, VIDEO_REJECTED_ANSWER);
+    requireChangedVersion(result);
+    const auto text = commonChecks(*result, false);
+    const auto& video = result->answer.mediaDescriptions[1];
+    MediaDescription expected;
+    expected.mediaType = MediaType::VIDEO;
+    expected.protocol = TransportProtocol::RTP_AVP;
+    expected.port = 0;
+    expected.formats = {"96"};
+    expected.direction = Direction::INACTIVE;
+    REQUIRE(video == expected);
+    REQUIRE(result->answer.mediaDescriptions[0] == mustParse(VIDEO_REJECTED_OFFER).mediaDescriptions[0]);
+    REQUIRE_FALSE(contains(text, "profile-level-id"));
+  }
+  SECTION("(6) opus with telephone-event at two clock rates")
+  {
+    auto result = answerSample(OPUS_OFFER, OPUS_ANSWER);
+    requireChangedVersion(result);
+    commonChecks(*result, false);
+    const auto& line = result->answer.mediaDescriptions[0];
+    REQUIRE(line.formats == Formats{"111", "100"});
+    REQUIRE_FALSE(hasRtpMap(line, 101));
+    REQUIRE_FALSE(hasFmtp(line, 101));
+  }
+  SECTION("(8) RFC 5939 capability negotiation has no answer")
+  {
+    REQUIRE_FALSE(answerSample(CAPNEG_OFFER, CAPNEG_ANSWER).has_value());
+  }
+  SECTION("(9) WebRTC-shaped non-BUNDLE DTLS-SRTP")
+  {
+    auto result = answerSample(WEBRTC_OFFER, WEBRTC_ANSWER);
+    requireChangedVersion(result);
+    const auto text = commonChecks(*result, false);
+    const auto own = mustParse(WEBRTC_OFFER);
+    const auto& answer = result->answer;
+    REQUIRE_FALSE(answer.setup.has_value());
+    REQUIRE(answer.fingerprints == own.fingerprints);
+    REQUIRE(answer.iceUfrag == own.iceUfrag);
+    REQUIRE(answer.icePwd == own.icePwd);
+    for (std::size_t i = 0; i < 2; ++i)
+    {
+      const auto& line = answer.mediaDescriptions[i];
+      REQUIRE(line.setup == std::optional<SetupRole>(SetupRole::PASSIVE));
+      REQUIRE(line.rtcpMux);
+      REQUIRE_FALSE(line.rtcpRsize);
+      REQUIRE(line.extMaps.size() == 1);
+      REQUIRE(line.msid == own.mediaDescriptions[i].msid);
+      REQUIRE(line.ssrcs == own.mediaDescriptions[i].ssrcs);
+      REQUIRE(line.candidates == own.mediaDescriptions[i].candidates);
+    }
+    REQUIRE(answer.mediaDescriptions[0].extMaps[0].id == 1);
+    REQUIRE(answer.mediaDescriptions[1].extMaps[0].id == 3);
+    const auto& feedbacks = answer.mediaDescriptions[1].rtcpFeedbacks;
+    REQUIRE(feedbacks.size() == 2);
+    REQUIRE(feedbacks[0].payloadType == "96");
+    REQUIRE(feedbacks[0].type == "nack");
+    REQUIRE(feedbacks[0].subtype == std::optional<std::string>("pli"));
+    REQUIRE(feedbacks[1].type == "ccm");
+    REQUIRE_FALSE(contains(text, "goog-remb"));
+    REQUIRE_FALSE(contains(text, "a=rtcp-rsize"));
+  }
+  SECTION("(9b) WebRTC with BUNDLE has no answer (NR-9)")
+  {
+    REQUIRE_FALSE(answerSample(WEBRTC_BUNDLE_OFFER, WEBRTC_BUNDLE_ANSWER).has_value());
+  }
+}
+
+TEST_CASE("answerReofferFromOwnOffer is total over the corpus and the samples (RA-T-26)", "[reoffer_answer][totality]")
+{
+  std::vector<std::filesystem::path> files;
+  for (const auto& entry : std::filesystem::directory_iterator(IORA_SDP_FUZZ_CORPUS_DIR))
+  {
+    if (entry.is_regular_file() && entry.path().extension() == ".sdp")
+    {
+      files.push_back(entry.path());
+    }
+  }
+  std::sort(files.begin(), files.end());
+
+  std::vector<SessionDescription> parsed;
+  std::vector<std::string> parsedNames;
+  for (const auto& file : files)
+  {
+    auto result = SdpParser::parse(readBinary(file));
+    if (result.hasValue())
+    {
+      parsed.push_back(*result.value);
+      parsedNames.push_back(file.filename().string());
+    }
+  }
+  REQUIRE(std::find(parsedNames.begin(), parsedNames.end(), "minimal.sdp") != parsedNames.end());
+  REQUIRE(std::find(parsedNames.begin(), parsedNames.end(), "sip.sdp") != parsedNames.end());
+
+  for (const auto& sample : realSamples())
+  {
+    parsed.push_back(mustParse(sample.ownOffer));
+    for (const auto& peerAnswer : sample.peerAnswers)
+    {
+      parsed.push_back(mustParse(peerAnswer));
+      parsed.push_back(mustParse(reofferFrom(peerAnswer)));
+    }
+  }
+
+  std::size_t pairs = 0;
+  for (const auto& reoffer : parsed)
+  {
+    for (const auto& ownOffer : parsed)
+    {
+      std::optional<ReofferAnswer> result;
+      REQUIRE_NOTHROW(result = OfferAnswer::answerReofferFromOwnOffer(reoffer, ownOffer));
+      if (result.has_value() && !result->differsFromOwnOffer)
+      {
+        REQUIRE(result->answer == ownOffer);
+      }
+      ++pairs;
+    }
+  }
+  REQUIRE(pairs == parsed.size() * parsed.size());
+  INFO("pairs run: " << pairs);
+  REQUIRE(pairs > 100);
 }

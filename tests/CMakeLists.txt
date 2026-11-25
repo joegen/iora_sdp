@@ -39,5 +39,9 @@ target_link_libraries(sdp_tests PRIVATE
   Catch2::Catch2
 )
 
+target_compile_definitions(sdp_tests PRIVATE
+  IORA_SDP_FUZZ_CORPUS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fuzz_corpus"
+)
+
 enable_testing()
 add_test(NAME sdp_tests COMMAND sdp_tests)
