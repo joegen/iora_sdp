@@ -552,6 +552,13 @@
         },
         "notes": "Creates a minimal valid SessionDescription skeleton. The application adds codecs (rtpmap, fmtp), ICE candidates, and any additional attributes. This is a convenience scaffold, not a complete offer."
       },
+      "reofferAnswer": {
+        "types": "struct ReofferAnswer { SessionDescription answer; bool differsFromOwnOffer; } (==, !=)",
+        "answerReofferFromOwnOffer": "static std::optional<ReofferAnswer> answerReofferFromOwnOffer(const SessionDescription& reoffer, const SessionDescription& ownOffer) — builds an RFC 3264 §8 answer to a peer's re-offer of an unchanged session by narrowing this UA's own last offer to what the re-offer kept (codecs one-to-one by name/clock or static PT < 35; SDES crypto by tag AND suite; rtcp-mux/rsize, extmap, rtcp-fb, groups, ICE only if the re-offer shows it; DTLS role; direction). Keeps the own origin; raises o= version by one only when the answer differs. std::nullopt when the re-offer does not fit or a rule cannot decide (BUNDLE, simulcast/rid, capability negotiation, key-mgmt, BFCP, live m=image, actpass/holdconn setup).",
+        "equalIgnoringOriginLine": "static bool equalIgnoringOriginLine(std::string_view, std::string_view) — byte compare of two SDP texts, skipping o= lines and empty lines (parser line splitter).",
+        "nextSessionVersion": "static std::optional<std::string> nextSessionVersion(std::string_view) — sess-version + 1 on the digit string with carry; std::nullopt if not all digits.",
+        "notes": "Pure static functions, no state, no locks. Callers: the iora_sip mid-dialog layer (B2BUA answering a session refresh). Guide: coding_trackers docs/iora_sdp/reoffer_answer_helpers.md; spec: coding_trackers architecture/iora_sdp/offer_answer_reoffer_helpers.json. Known gap: the serializer drops a=fmtp of a format without a=rtpmap (tracker 2026-11-25-3)."
+      },
       "createAnswer": {
         "signature": "SessionDescription createAnswer(const SessionDescription& offer, const AnswerOptions& answerOptions)",
         "description": "Generate an SDP answer from a received offer. Intersects codecs per media section (retaining answerer preference order), generates its own ICE credentials (or uses answerOptions-supplied ones), and sets direction by flipping the offer's direction (sendonly->recvonly, recvonly->sendonly, sendrecv->sendrecv, inactive->inactive). NON-BUNDLE-AWARE: it does NOT copy the offer's a=group attributes (BUNDLE or LS) into the answer — echoing a=group:BUNDLE would name port-0 rejected sections (RFC 8843 §7.3.3(a)) and the function implements none of §7.3's positive answerer obligations; a non-BUNDLE answer (no a=group, per-m= ports) is the RFC 8843 §1.2 backward-compat baseline. A BUNDLE/WebRTC consumer must not route BUNDLE offers through this primitive (tasks 2026-07-25-2, 2026-09-02-4/5/6/7).",
@@ -924,7 +931,7 @@
               "session_description.hpp": "Layer 1 — SessionDescription, MediaDescription, Origin, ConnectionData, BandwidthInfo, TimeDescription, RepeatTime, ZoneAdjustment. Includes types.hpp and attributes.hpp.",
               "sdp_parser.hpp": "Layer 2 — SdpParser with parse(), parseMediaSection(), parseAttribute(). SdpParserOptions, ParseResult, ParseError, ParseWarning. Includes session_description.hpp.",
               "sdp_serializer.hpp": "Layer 3 — SdpSerializer with serialize(), serializeMediaSection(), serializeAttribute(). SdpSerializerOptions. Includes session_description.hpp.",
-              "offer_answer.hpp": "Layer 4 — Utility functions: createOffer(), createAnswer(), matchCodecs(), addIceCandidate(), addTransceiver(), pruneUnusedCodecs(), addDataChannel(), setMediaDirection(), flipDirection(), disableMedia(), findMediaByMid(), generateIceCredentials(), removeIceCandidates(), isMediaDisabled(). OfferOptions, AnswerOptions, TransceiverOptions, DataChannelOptions. Includes session_description.hpp."
+              "offer_answer.hpp": "Layer 4 — Utility functions: createOffer(), createAnswer(), matchCodecs(), addIceCandidate(), addTransceiver(), pruneUnusedCodecs(), addDataChannel(), setMediaDirection(), flipDirection(), disableMedia(), findMediaByMid(), generateIceCredentials(), removeIceCandidates(), isMediaDisabled(), answerReofferFromOwnOffer(), equalIgnoringOriginLine(), nextSessionVersion(). ReofferAnswer, OfferOptions, AnswerOptions, TransceiverOptions, DataChannelOptions. Includes session_description.hpp."
             }
           }
         },
@@ -934,6 +941,7 @@
           "test_parser.cpp": "Unit tests for SdpParser — session-level parsing, media-level parsing, attribute dispatch, lenient vs strict mode, error/warning accumulation, malformed input handling",
           "test_serializer.cpp": "Unit tests for SdpSerializer — field ordering, attribute serialization, edge cases, options (line endings, omissions)",
           "test_round_trip.cpp": "Round-trip tests — parse SDP text, serialize back, compare. Verifies parse(serialize(parse(input))) == parse(input) for various SDP documents",
+          "test_reoffer_answer.cpp": "Unit tests for the re-offer answer helpers (RA-T-1..34): nextSessionVersion, equalIgnoringOriginLine, every answerReofferFromOwnOffer rule, real-SDP round trips (carrier, rtpengine, Teams, T.38, WebRTC) and corpus totality",
           "test_offer_answer.cpp": "Unit tests for Layer 4 utilities — createOffer defaults, createAnswer generation, matchCodecs intersection, addIceCandidate, addTransceiver, pruneUnusedCodecs, addDataChannel, direction helpers, flipDirection, disableMedia, findMediaByMid, generateIceCredentials, removeIceCandidates, negative test cases (zero codec overlap, empty media, invalid input)",
           "test_webrtc_sdp.cpp": "Real-world SDP samples from Chrome, Firefox, Safari, and minimal/maximal SDP with all extensions. Verifies that the parser handles production browser SDP correctly and round-trips faithfully.",
           "fuzz_parser.cpp": "Fuzz testing harness for the SDP parser, compatible with AFL and libFuzzer. Feeds arbitrary byte sequences into SdpParser::parse() to discover crashes, hangs, and undefined behavior in the network-facing parser."
