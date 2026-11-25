@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 #include "iora/sdp/sdp_parser.hpp"
+#include "iora/sdp/sdp_serializer.hpp"
 
 using namespace iora::sdp;
 
@@ -1529,6 +1530,50 @@ TEST_CASE("Parser: missing s= line (requireSessionName=true)", "[parser][error]"
   auto result = SdpParser::parse(sdp);
   REQUIRE(!result.hasValue());
   REQUIRE(result.hasError());
+}
+
+TEST_CASE("Parser: s= with a single space keeps the space (RFC 4566 5.3)", "[parser][s-line]")
+{
+  auto text = [](const std::string& sLine) {
+    return "v=0\r\no=- 0 0 IN IP4 192.0.2.1\r\n" + sLine + "\r\nt=0 0\r\n";
+  };
+  for (bool strict : {false, true})
+  {
+    CAPTURE(strict);
+    SdpParserOptions opts;
+    opts.strict = strict;
+
+    auto space = SdpParser::parse(text("s= "), opts);
+    REQUIRE(space.hasValue());
+    REQUIRE(space.value->sessionName == " ");
+    REQUIRE(SdpSerializer::serialize(*space.value).find("\r\ns= \r\n") != std::string::npos);
+
+    auto dash = SdpParser::parse(text("s=-"), opts);
+    REQUIRE(dash.hasValue());
+    REQUIRE(dash.value->sessionName == "-");
+
+    // Any whitespace-only text is kept verbatim (RFC 4566 text allows it).
+    auto tab = SdpParser::parse(text("s=\t"), opts);
+    REQUIRE(tab.hasValue());
+    REQUIRE(tab.value->sessionName == "\t");
+    auto spaces = SdpParser::parse(text("s=  "), opts);
+    REQUIRE(spaces.hasValue());
+    REQUIRE(spaces.value->sessionName == "  ");
+  }
+
+  // Lenient trimming still applies to a named session and to indentation.
+  auto named = SdpParser::parse(text("s=Call "));
+  REQUIRE(named.hasValue());
+  REQUIRE(named.value->sessionName == "Call");
+  auto indented = SdpParser::parse(text("  s= "));
+  REQUIRE(indented.hasValue());
+  REQUIRE(indented.value->sessionName == " ");
+
+  // Strict still rejects padding around a named session and an indented line.
+  SdpParserOptions strictOpts;
+  strictOpts.strict = true;
+  REQUIRE_FALSE(SdpParser::parse(text("s=Call "), strictOpts).hasValue());
+  REQUIRE_FALSE(SdpParser::parse(text(" s= "), strictOpts).hasValue());
 }
 
 TEST_CASE("Parser: missing t= line with requireTiming=true", "[parser][error]")

@@ -1442,11 +1442,19 @@ inline ParseResult<SessionDescription> doParse(
       continue;
     }
 
+    // RFC 4566 5.3 / RFC 3264 5: "s= " (whitespace-only text) is the recommended
+    // unnamed-session form. Keep that value verbatim instead of trimming it to "".
+    const std::size_t firstText = line.find_first_not_of(" \t");
+    const std::string_view unindented =
+      firstText == std::string_view::npos ? std::string_view{} : line.substr(firstText);
+    const bool blankSessionLine = unindented.size() > 2 && unindented[0] == 's' &&
+                                  unindented[1] == '=' && trimView(unindented.substr(2)).empty();
     if (!options.strict)
     {
       line = trimView(line);
     }
-    else if (line != trimView(line))
+    // Strict: for an unindented blank s= line the trailing whitespace is the text itself.
+    else if (!(blankSessionLine && unindented.size() == line.size()) && line != trimView(line))
     {
       result.value.reset();
       result.error = ParseError{lineNum, "Leading/trailing whitespace in strict mode"};
@@ -1660,7 +1668,7 @@ inline ParseResult<SessionDescription> doParse(
         }
         case 's':
           hasSessionName = true;
-          session.sessionName = std::string(val);
+          session.sessionName = blankSessionLine ? std::string(unindented.substr(2)) : std::string(val);
           break;
         case 'i':
           session.sessionInfo = std::string(val);
