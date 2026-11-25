@@ -316,6 +316,10 @@ struct OfferAnswer
       std::optional<SetupRole> setupRole;
     };
     std::vector<LineResult> results(lineCount);
+    const auto effectiveSetup = [](const MediaDescription& line, const SessionDescription& sdp)
+    {
+      return line.setup.has_value() ? line.setup : sdp.setup;
+    };
 
     // S5: per line.
     for (std::size_t i = 0; i < lineCount; ++i)
@@ -361,16 +365,15 @@ struct OfferAnswer
           std::optional<CryptoAttribute> picked;
           for (const auto& reCrypto : re.crypto)
           {
-            for (const auto& ownCrypto : own.crypto)
+            const auto match = std::find_if(own.crypto.begin(), own.crypto.end(),
+                [&](const CryptoAttribute& ownCrypto)
+                {
+                  return ownCrypto.tag == reCrypto.tag
+                      && detail::iequals(ownCrypto.suite, reCrypto.suite);
+                });
+            if (match != own.crypto.end())
             {
-              if (ownCrypto.tag == reCrypto.tag)
-              {
-                picked = ownCrypto;
-                break;
-              }
-            }
-            if (picked.has_value())
-            {
+              picked = *match;
               break;
             }
           }
@@ -409,8 +412,8 @@ struct OfferAnswer
       filterReofferRtcpFeedback(re, chosenBy, out);
 
       // S5f (NR-6, RA-SC-3, RA-SC-14) and the a=tls-id rule.
-      const std::optional<SetupRole> reSetup = re.setup.has_value() ? re.setup : reoffer.setup;
-      const std::optional<SetupRole> ownSetup = own.setup.has_value() ? own.setup : ownOffer.setup;
+      const std::optional<SetupRole> reSetup = effectiveSetup(re, reoffer);
+      const std::optional<SetupRole> ownSetup = effectiveSetup(own, ownOffer);
       const bool ownIsDtls = !own.fingerprints.empty() || !ownOffer.fingerprints.empty();
       if (ownSetup.has_value())
       {
@@ -437,7 +440,10 @@ struct OfferAnswer
           result.setupRole = computed;
         }
       }
-      const auto isTlsId = [](const GenericAttribute& attribute) { return attribute.name == "tls-id"; };
+      const auto isTlsId = [](const GenericAttribute& attribute)
+      {
+        return attribute.name == "tls-id";
+      };
       if (std::none_of(re.genericAttributes.begin(), re.genericAttributes.end(), isTlsId))
       {
         out.genericAttributes.erase(
@@ -471,8 +477,8 @@ struct OfferAnswer
       {
         directionsUnchanged = false;
       }
-      const auto& own = ownOffer.mediaDescriptions[i];
-      const std::optional<SetupRole> ownSetup = own.setup.has_value() ? own.setup : ownOffer.setup;
+      const std::optional<SetupRole> ownSetup =
+          effectiveSetup(ownOffer.mediaDescriptions[i], ownOffer);
       if (results[i].setupRole.has_value() && results[i].setupRole != ownSetup)
       {
         rolesUnchanged = false;
@@ -498,10 +504,9 @@ struct OfferAnswer
         {
           continue;
         }
-        const auto& own = ownOffer.mediaDescriptions[i];
         answer.mediaDescriptions[i].setup = results[i].setupRole.has_value()
           ? results[i].setupRole
-          : (own.setup.has_value() ? own.setup : ownOffer.setup);
+          : effectiveSetup(ownOffer.mediaDescriptions[i], ownOffer);
       }
     }
 
@@ -523,38 +528,24 @@ struct OfferAnswer
     {
       GroupAttribute kept;
       kept.semantics = ownGroup.semantics;
-      bool semanticsInReoffer = false;
-      for (const auto& reGroup : reoffer.groups)
+      for (const auto& mid : ownGroup.mids)
       {
-        if (!detail::iequals(reGroup.semantics, ownGroup.semantics))
-        {
-          continue;
-        }
-        semanticsInReoffer = true;
-        for (const auto& mid : ownGroup.mids)
-        {
-          const bool inReGroup =
-            std::find(reGroup.mids.begin(), reGroup.mids.end(), mid) != reGroup.mids.end();
-          const bool alreadyKept =
+        const bool inReofferGroup = std::any_of(reoffer.groups.begin(), reoffer.groups.end(),
+            [&](const GroupAttribute& reGroup)
+            {
+              return detail::iequals(reGroup.semantics, ownGroup.semantics)
+                  && std::find(reGroup.mids.begin(), reGroup.mids.end(), mid)
+                         != reGroup.mids.end();
+            });
+        const bool alreadyKept =
             std::find(kept.mids.begin(), kept.mids.end(), mid) != kept.mids.end();
-          if (inReGroup && !alreadyKept && namesLiveAnswerLine(mid))
-          {
-            kept.mids.push_back(mid);
-          }
+        if (inReofferGroup && !alreadyKept && namesLiveAnswerLine(mid))
+        {
+          kept.mids.push_back(mid);
         }
       }
-      if (semanticsInReoffer && !kept.mids.empty())
+      if (!kept.mids.empty())
       {
-        std::vector<std::string> ordered;
-        for (const auto& mid : ownGroup.mids)
-        {
-          if (std::find(kept.mids.begin(), kept.mids.end(), mid) != kept.mids.end()
-              && std::find(ordered.begin(), ordered.end(), mid) == ordered.end())
-          {
-            ordered.push_back(mid);
-          }
-        }
-        kept.mids = std::move(ordered);
         answer.groups.push_back(std::move(kept));
       }
     }
@@ -1681,21 +1672,21 @@ private:
       }
       else
       {
-        bool found = false;
-        for (const auto& candidate : candidates)
-        {
-          const auto candidatePt = formatToPayloadType(candidate);
-          if (rePt.has_value() && candidatePt.has_value() && *candidatePt == *rePt)
-          {
-            chosen = candidate;
-            found = true;
-            break;
-          }
-        }
-        if (!found)
+        if (!rePt.has_value())
         {
           return false;
         }
+        const auto match = std::find_if(candidates.begin(), candidates.end(),
+            [&](const std::string& candidate)
+            {
+              const auto candidatePt = formatToPayloadType(candidate);
+              return candidatePt.has_value() && *candidatePt == *rePt;
+            });
+        if (match == candidates.end())
+        {
+          return false;
+        }
+        chosen = *match;
       }
       if (std::find(chosenOwn.begin(), chosenOwn.end(), chosen) != chosenOwn.end())
       {
@@ -1759,10 +1750,9 @@ private:
         {
           if (feedback.payloadType == "*")
           {
-            for (const auto& [ownPt, rePt] : keptNumbers)
+            for (const auto& kept : keptNumbers)
             {
-              (void)ownPt;
-              if (!hasRtcpFb(re, rePt, feedback.type, feedback.subtype))
+              if (!hasRtcpFb(re, kept.second, feedback.type, feedback.subtype))
               {
                 return true;
               }
